@@ -1,0 +1,30 @@
+# Engineered by uncoalesced
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cordon"
+version = "0.1.0"
+description = "Tool-call-granularity resource characterization and control for AI coding agents"
+requires-python = ">=3.11"
+dependencies = ["psutil>=5.9"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5"]
+
+[project.scripts]
+cordon = "features.wrapper.cli:main"
+
+[tool.setuptools]
+packages = ["features", "features.wrapper", "features.analysis"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=features --cov-report=term-missing"
+markers = ["integration: exercises a full sampler or hook cycle against real processes"]
+
+[tool.coverage.run]
+branch = true
+omit = ["*/__init__.py"]
