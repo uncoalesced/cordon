@@ -1,16 +1,33 @@
 # Cordon
 
-Tool-call-granularity resource characterization and control for AI coding agents.
+Tool-call-granularity resource characterization for AI coding agents, built on Claude Code's
+own hooks — no forking, no root, no cgroups yet.
 
 Existing resource controllers see "a subprocess." Cordon sees "a `pytest` run that needs
-500MB" versus "a `git status` that needs 13MB" — and eventually acts on the difference.
-Grounded in AgentCgroup (arXiv 2602.09345) and AgentSight (arXiv 2508.02736); see
-[CLAUDE.md](CLAUDE.md) for the full spec.
+500MB" versus "a `git status` that needs 13MB." Right now it only *measures* that difference
+(Stage 1); the point is to eventually *act* on it (Stage 2). Grounded in AgentCgroup
+(arXiv 2602.09345) and AgentSight (arXiv 2508.02736); see [CLAUDE.md](CLAUDE.md) for the full spec.
 
-## Status
+## What's actually built (Stage 1)
 
-**Stage 1 — characterization.** Measurement only: no cgroups, no eBPF, no root, cross-platform.
-Stages 2a (`sched_ext`, CPU) and 2b (`memcg_bpf_ops`, memory) require Linux 6.12+ and are not started.
+- `cordon install-hooks` wires `PreToolUse` / `PostToolUse` / `SessionStart` / `SessionEnd`
+  in `.claude/settings.json` to `cordon hook`.
+- On the first tool call, the hook spawns one background sampler for the whole session
+  (`cordon sample`) rather than one per tool call — a fresh process per call would cost
+  ~100ms and contaminate the measurement it's trying to take.
+- The sampler walks up from the hook process to find the agent root (e.g. `claude.exe`),
+  then polls RSS + CPU% across its *entire process tree* every 250ms and appends to
+  `samples.jsonl`. Each `PreToolUse`/`PostToolUse` writes a timestamped marker to
+  `markers.jsonl`.
+- `cordon reduce` joins the two streams into one JSON record per tool call in
+  `toolcalls.jsonl`: start/end timestamps, peak/avg memory, avg CPU, and the raw
+  per-tick samples for that call's window (kept, not just aggregated, so burst-shape
+  analysis is possible later).
+- Every hook path exits 0 unconditionally — a broken measurement must never break the
+  agent being measured.
+
+Stages 2a (`sched_ext`, CPU enforcement) and 2b (`memcg_bpf_ops`, memory enforcement) are
+spec'd in CLAUDE.md but not started; both need a Linux 6.12+ box.
 
 ## Install
 
@@ -24,11 +41,13 @@ python -m venv .venv
 Install the hooks into the repo where the agent will actually do its work:
 
 ```
-.venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo
+.venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --write
 ```
 
-Run the agent. Cordon writes a per-session sample stream and marker log under `runs/`.
-Then reduce those into one JSON line per tool call:
+(omit `--write` to preview the settings.json merge without touching anything)
+
+Run the agent normally. Cordon writes a per-session sample stream and marker log under
+`runs/<session-id>/`. Once the session ends, reduce those into one JSON line per tool call:
 
 ```
 .venv\Scripts\cordon.exe reduce --run-dir runs\<session-id>
