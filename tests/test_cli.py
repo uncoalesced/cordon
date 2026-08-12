@@ -1,0 +1,78 @@
+# Engineered by uncoalesced
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+from features.wrapper.cli import HOOK_EVENTS, _merge_hooks, build_parser, hook_settings, main
+from features.wrapper.schema import MARKERS_FILENAME, SAMPLES_FILENAME, JsonlWriter, Marker, Sample
+
+
+def test_hook_settings_covers_every_lifecycle_event():
+    settings = hook_settings()
+    assert set(settings["hooks"]) == set(HOOK_EVENTS)
+    for event in HOOK_EVENTS:
+        assert settings["hooks"][event][0]["hooks"][0]["command"].endswith("hook")
+
+
+def test_merge_hooks_preserves_unrelated_settings():
+    existing = {"model": "opus", "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "other"}]}]}}
+    merged = _merge_hooks(existing, hook_settings())
+    assert merged["model"] == "opus"
+    assert len(merged["hooks"]["PreToolUse"]) == 2
+
+
+def test_merge_hooks_is_idempotent():
+    once = _merge_hooks({}, hook_settings())
+    twice = _merge_hooks(once, hook_settings())
+    assert once == twice
+
+
+def test_install_hooks_dry_run_writes_nothing(tmp_path: Path, capsys):
+    assert main(["install-hooks", "--target", str(tmp_path)]) == 0
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+    assert "dry run" in capsys.readouterr().out
+
+
+def test_install_hooks_write_creates_valid_settings(tmp_path: Path):
+    assert main(["install-hooks", "--target", str(tmp_path), "--write"]) == 0
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert set(settings["hooks"]) == set(HOOK_EVENTS)
+
+
+def test_install_hooks_refuses_to_clobber_unreadable_settings(tmp_path: Path):
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text("{ broken", encoding="utf-8")
+    assert main(["install-hooks", "--target", str(tmp_path), "--write"]) == 1
+    assert settings_path.read_text(encoding="utf-8") == "{ broken"
+
+
+def test_reduce_command_prints_summary(tmp_path: Path, capsys):
+    run_dir = tmp_path / "run"
+    with JsonlWriter(run_dir / MARKERS_FILENAME) as writer:
+        writer.write(Marker(event="tool_start", ts=1.0, session_id="s", call_key="k", tool_type="Bash"))
+        writer.write(Marker(event="tool_end", ts=2.0, session_id="s", call_key="k"))
+    with JsonlWriter(run_dir / SAMPLES_FILENAME) as writer:
+        writer.write(Sample(t=1.5, mem_mb=42.0, cpu_pct=1.0))
+
+    assert main(["reduce", "--run-dir", str(run_dir)]) == 0
+    assert json.loads(capsys.readouterr().out)["n_toolcalls"] == 1
+
+
+def test_sample_command_writes_a_stream(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    assert main(["sample", "--run-dir", str(run_dir), "--pid", str(os.getpid()), "--interval", "0.01", "--max-duration", "0.15"]) == 0
+    assert (run_dir / SAMPLES_FILENAME).exists()
+
+
+def test_parser_requires_a_subcommand(capsys):
+    parser = build_parser()
+    try:
+        parser.parse_args([])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("expected SystemExit")
