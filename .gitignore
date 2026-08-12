@@ -1,0 +1,26 @@
+# Engineered by uncoalesced
+
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Characterization output: raw sample streams and marker logs are run artifacts,
+# not source. Curated result sets get committed explicitly under docs/data/.
+runs/
+*.jsonl
+!docs/data/*.jsonl
+
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
