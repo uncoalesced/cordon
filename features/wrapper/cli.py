@@ -1,0 +1,158 @@
+# Engineered by uncoalesced
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+from features.wrapper import hook as hook_module
+from features.wrapper.logging_setup import configure, get_logger, log_failure
+from features.wrapper.reduce import reduce_run
+from features.wrapper.sampler import DEFAULT_INTERVAL_S, resolve_agent_root, run_sampler
+from features.wrapper.schema import RUN_LOG_FILENAME
+
+HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "SessionEnd")
+
+
+def _hook_command() -> str:
+    script = Path(sys.executable).with_name("cordon.exe" if os.name == "nt" else "cordon")
+    if script.exists():
+        return f'"{script}" hook'
+    return f'"{sys.executable}" -m features.wrapper.cli hook'
+
+
+def hook_settings() -> dict[str, Any]:
+    entry = {"matcher": "*", "hooks": [{"type": "command", "command": _hook_command()}]}
+    return {"hooks": {event: [dict(entry)] for event in HOOK_EVENTS}}
+
+
+def _merge_hooks(existing: dict[str, Any], additions: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(existing)
+    hooks = dict(merged.get("hooks") or {})
+    for event, entries in additions["hooks"].items():
+        current = list(hooks.get(event) or [])
+        commands = {
+            h.get("command")
+            for group in current
+            if isinstance(group, dict)
+            for h in (group.get("hooks") or [])
+            if isinstance(h, dict)
+        }
+        for entry in entries:
+            if entry["hooks"][0]["command"] not in commands:
+                current.append(entry)
+        hooks[event] = current
+    merged["hooks"] = hooks
+    return merged
+
+
+def cmd_sample(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    configure(log_path=run_dir / RUN_LOG_FILENAME, level=logging.DEBUG if args.verbose else logging.INFO)
+    log = get_logger("cli")
+
+    pid = args.pid if args.pid else resolve_agent_root()
+    log.info("sampling | run_dir=%s pid=%s interval=%s", run_dir, pid, args.interval)
+
+    try:
+        written = run_sampler(run_dir, root_pid=pid, interval=args.interval, max_duration_s=args.max_duration)
+    except Exception:
+        log_failure(log, "sampler aborted", run_dir=str(run_dir), pid=pid, interval=args.interval)
+        return 1
+
+    log.info("sampling finished | samples=%s", written)
+    return 0
+
+
+def cmd_reduce(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    configure(log_path=run_dir / RUN_LOG_FILENAME, level=logging.DEBUG if args.verbose else logging.INFO)
+    log = get_logger("cli")
+
+    try:
+        result = reduce_run(run_dir, task_id=args.task_id)
+    except Exception:
+        log_failure(log, "reduction aborted", run_dir=str(run_dir), task_id=args.task_id)
+        return 1
+
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_install_hooks(args: argparse.Namespace) -> int:
+    configure(level=logging.INFO)
+    log = get_logger("cli")
+
+    settings_path = Path(args.target) / ".claude" / "settings.json"
+    additions = hook_settings()
+
+    existing: dict[str, Any] = {}
+    if settings_path.exists():
+        try:
+            existing = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            log_failure(log, "existing settings unreadable, refusing to overwrite", path=str(settings_path))
+            return 1
+
+    merged = _merge_hooks(existing, additions)
+    rendered = json.dumps(merged, indent=2)
+
+    if not args.write:
+        print(f"# dry run: would write {settings_path}\n# re-run with --write to apply\n{rendered}")
+        return 0
+
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(rendered + "\n", encoding="utf-8")
+    except OSError:
+        log_failure(log, "could not write settings", path=str(settings_path))
+        return 1
+
+    log.info("hooks installed | path=%s", settings_path)
+    return 0
+
+
+def cmd_hook(_args: argparse.Namespace) -> int:
+    return hook_module.main()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="cordon", description="Agent tool-call resource characterization")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    sample = subparsers.add_parser("sample", help="sample an agent process tree until it exits")
+    sample.add_argument("--run-dir", required=True)
+    sample.add_argument("--pid", type=int, default=0)
+    sample.add_argument("--interval", type=float, default=DEFAULT_INTERVAL_S)
+    sample.add_argument("--max-duration", type=float, default=None)
+    sample.set_defaults(func=cmd_sample)
+
+    reduce_parser = subparsers.add_parser("reduce", help="join markers and samples into per-tool-call records")
+    reduce_parser.add_argument("--run-dir", required=True)
+    reduce_parser.add_argument("--task-id", default=None)
+    reduce_parser.set_defaults(func=cmd_reduce)
+
+    install = subparsers.add_parser("install-hooks", help="print or write Claude Code hook settings")
+    install.add_argument("--target", required=True)
+    install.add_argument("--write", action="store_true")
+    install.set_defaults(func=cmd_install_hooks)
+
+    hook_parser = subparsers.add_parser("hook", help="hook entrypoint; reads one JSON payload on stdin")
+    hook_parser.set_defaults(func=cmd_hook)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
