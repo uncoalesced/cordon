@@ -10,6 +10,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from features.analysis.dataset import load_dataset
+from features.analysis.metrics import BURST_THRESHOLD_MB, analyze_dataset
+from features.analysis.report import render_report
 from features.wrapper import hook as hook_module
 from features.wrapper.logging_setup import configure, get_logger, log_failure
 from features.wrapper.reduce import reduce_run
@@ -84,6 +87,38 @@ def cmd_reduce(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    configure(level=logging.DEBUG if args.verbose else logging.INFO)
+    log = get_logger("cli")
+
+    try:
+        runs = load_dataset(Path(args.runs))
+        dataset = analyze_dataset(runs, burst_threshold_mb=args.burst_threshold)
+    except Exception:
+        log_failure(log, "analysis aborted", runs=str(args.runs), burst_threshold=args.burst_threshold)
+        return 1
+
+    if args.json:
+        print(json.dumps(dataset.to_dict(), indent=2, sort_keys=True, default=repr))
+        return 0
+
+    report = render_report(dataset, title=args.title)
+
+    if args.out:
+        out_path = Path(args.out)
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(report, encoding="utf-8")
+        except OSError:
+            log_failure(log, "could not write report", path=str(out_path))
+            return 1
+        log.info("report written | path=%s runs=%s calls=%s", out_path, dataset.n_runs, dataset.n_toolcalls)
+        return 0
+
+    print(report)
+    return 0
+
+
 def cmd_install_hooks(args: argparse.Namespace) -> int:
     configure(level=logging.INFO)
     log = get_logger("cli")
@@ -137,6 +172,14 @@ def build_parser() -> argparse.ArgumentParser:
     reduce_parser.add_argument("--run-dir", required=True)
     reduce_parser.add_argument("--task-id", default=None)
     reduce_parser.set_defaults(func=cmd_reduce)
+
+    analyze = subparsers.add_parser("analyze", help="characterize reduced runs against the paper's findings")
+    analyze.add_argument("--runs", default="runs")
+    analyze.add_argument("--out", default=None)
+    analyze.add_argument("--burst-threshold", type=float, default=BURST_THRESHOLD_MB)
+    analyze.add_argument("--json", action="store_true")
+    analyze.add_argument("--title", default="Stage 1 — Characterization Findings")
+    analyze.set_defaults(func=cmd_analyze)
 
     install = subparsers.add_parser("install-hooks", help="print or write Claude Code hook settings")
     install.add_argument("--target", required=True)
