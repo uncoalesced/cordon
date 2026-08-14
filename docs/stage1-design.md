@@ -93,7 +93,7 @@ Two append-only files per session under `runs/<session-id>/`:
 - `samples.jsonl` — one line per sampling tick
 
 `cordon reduce` joins them into `toolcalls.jsonl`, one line per tool call in the CLAUDE.md §11
-schema, raw per-tick samples included.
+schema, raw per-tick samples included, plus `summary.json` with the run's degradation counters.
 
 Three files rather than one because the two producers have different lifetimes and failure
 modes. A crashed sampler must not lose the marker log, and a hook that fails to fire must not
@@ -109,6 +109,34 @@ This is exact for the common case and degrades on genuine concurrent duplicates 
 invoked with byte-identical input twice at once. The reducer counts these in `unpaired_starts`
 and `orphan_ends` rather than guessing, so contamination is visible in the output instead of
 silently folded into the results.
+
+## The analysis pass
+
+`cordon analyze` loads every reduced run under a root and computes the five passes CLAUDE.md
+§11 step 5 asks for, plus the two burst measures from §6 that the raw sample stream makes
+available. Output is a markdown report with a measured-versus-paper verdict per metric, or
+raw JSON via `--json`.
+
+Two definitions are choices rather than givens, so they are stated here:
+
+**Baseline memory is the 10th percentile of the session's samples**, not the median of samples
+falling outside tool-call windows. The window-complement median was the obvious first
+definition and it is wrong on exactly the runs that matter: a session dominated by tool calls
+has few idle samples, and one dominated by *bursty* tool calls poisons its own baseline with
+the bursts it is supposed to measure against. A low quantile is the resting floor by
+construction and needs no window bookkeeping.
+
+**A retry group is three or more strictly consecutive calls** of the same tool with a
+byte-identical command, matching the paper's wording. Any intervening call of any type breaks
+the run. This undercounts the real-world pattern where a failing `pytest` alternates with
+`Read`/`Edit` calls — that is a genuine limitation, not an oversight. `retry_profile` takes an
+`ignore_tools` argument to relax it; the default stays strict so the number remains comparable
+to the paper's 85–97%.
+
+Reported metrics distinguish "measured zero" from "not measurable". A dataset with no Bash
+calls at all reports no data for the Bash share; a dataset with Bash calls but no test commands
+reports 0%. Collapsing those two into one number is how a report ends up claiming a divergence
+it never measured.
 
 ## Error handling
 
