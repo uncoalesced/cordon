@@ -39,8 +39,38 @@ for each one.
 Every hook path exits 0, no matter what happens internally. A broken measurement should never
 break the agent it's measuring.
 
-Stage 2a (CPU enforcement via `sched_ext`) and Stage 2b (memory enforcement via
-`memcg_bpf_ops`) are designed but not started. Both need a Linux 6.12+ machine.
+## What Stage 2 will do
+
+Stage 1 only watches. Stage 2 is where Cordon would start acting on what it sees, and it's
+designed but not built yet.
+
+Each tool call would get its own ephemeral cgroup, created right before the subprocess spawns
+and torn down after it exits. On the CPU side (Stage 2a), a `sched_ext` policy would decide
+scheduling priority in-kernel, at microsecond speed. That matters because the alternative, a
+userspace daemon watching pressure signals and reacting, takes tens of milliseconds per round
+trip. A memory burst that lasts a second or two is often over by the time a daemon-based
+approach would even notice it.
+
+On the memory side (Stage 2b), each cgroup would get a `memory.high` soft limit. Crossing it
+doesn't kill anything by default; it triggers reclaim pressure. A `memcg_bpf_ops` hook would
+decide how long to throttle a call that crosses its limit, and only escalate to freezing the
+process, not killing it, if throttling alone isn't enough. Killing a tool call mid-run destroys
+whatever context the agent had built up to that point, and a retried agent doesn't reliably
+reach the same solution twice, so a kill is treated as a last resort rather than the default
+response to pressure.
+
+The other half of Stage 2 is a feedback loop, not just a limit. An agent could set an
+environment variable before a tool call, something like `AGENT_RESOURCE_HINT=memory:high`
+before running a test suite, to hint at what it's about to need. That hint is advisory, not
+binding; the system doesn't have to trust it. Going the other way, if a call gets throttled or
+frozen past some threshold, Cordon would write a plain-English note to that call's stderr, for
+example that it peaked at 3.5GB and got throttled for 340ms. Since the agent reads its own tool
+output on the next turn, it would see that note as part of the result and could adjust rather
+than just failing silently.
+
+Stage 2a needs a Linux 6.12+ machine, which is where `sched_ext` shipped. Stage 2b needs more:
+`memcg_bpf_ops` is a kernel patch series, not yet merged upstream, so it either needs a
+self-built patched kernel or waiting for the RFC to land.
 
 ## Install
 
