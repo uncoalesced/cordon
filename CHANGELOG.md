@@ -107,3 +107,32 @@ File-level granularity: every commit gets a line naming the file it touched and 
 - `docs/stage1-design.md` — documents the analysis pass, the baseline-definition change and
   why the obvious first definition was wrong, and the retry-detection limitation.
 - `README.md` — documents the `analyze` step.
+
+### CI and housekeeping
+
+- `.github/workflows/ci.yml` — tests across ubuntu and windows on Python 3.11, 3.12 and 3.13,
+  with an 85% coverage gate applied in CI rather than in `pyproject.toml` so a local run of one
+  test file does not fail on coverage. Both platforms are in the matrix deliberately: Stage 1 is
+  developed on Windows and Stage 2 targets Linux, so a Linux regression must not go unnoticed
+  until the kernel work starts. A separate CLI job drives the installed `cordon` console script
+  end to end — sample a real process tree, feed real payloads through the `hook` stdin
+  entrypoint, then reduce and analyze — because the test suite imports modules and therefore
+  proves nothing about the packaged entry points.
+- `tests/test_watermark.py` — asserts every source file carries the `# Engineered by
+  uncoalesced` watermark required by CLAUDE.md §1. Written as a test rather than a CI-only
+  script so it fails locally at the moment the file is added, not an hour later in a pipeline.
+- `tests/test_sampler.py` — made the child-inclusion test poll until the spawned child's
+  allocation lands. It asserted immediately after spawn, which passes on a fast local machine
+  and flakes on a loaded CI runner: the process exists before its memory does.
+- `CLAUDE.md` — wrote §15 Open Questions locally, listed in the table of contents since the
+  first draft but absent from the body. Eleven questions across data collection, measurement
+  validity, Stage 2 gating and protocol design, each naming what it blocks or which number it
+  changes. The file itself is no longer version-controlled (see below), so this content lives
+  on disk only.
+- Removed `CLAUDE.md` from git history entirely via `git filter-repo`, on both `main` and
+  `development` — the repo is public, and the spec (including the internship-provenance note
+  in §10) had already been merged into `main`. Untracking it going forward would not have
+  removed what was already published; every commit was rewritten to strip the file, and both
+  branches force-pushed. `README.md`'s references to it were removed.
+- `.gitignore` — ignore `CLAUDE.md` so it can't be re-added by accident, and the `.git-broken*`
+  / `.git-oldswap*` salvage copies left behind by earlier repo repair attempts.
