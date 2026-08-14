@@ -13,6 +13,9 @@ from typing import Any
 from features.analysis.dataset import load_dataset
 from features.analysis.metrics import BURST_THRESHOLD_MB, analyze_dataset
 from features.analysis.report import render_report
+from features.control import contention, probe as probe_module
+from features.control.guard import run_guarded
+from features.control.intent import ENV_HINT as INTENT_ENV
 from features.wrapper import hook as hook_module
 from features.wrapper.logging_setup import configure, get_logger, log_failure
 from features.wrapper.reduce import reduce_run
@@ -156,6 +159,67 @@ def cmd_hook(_args: argparse.Namespace) -> int:
     return hook_module.main()
 
 
+def cmd_control_probe(args: argparse.Namespace) -> int:
+    configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
+    capabilities = probe_module.probe()
+    if args.json:
+        print(json.dumps([c.to_dict() for c in capabilities], indent=2, sort_keys=True))
+    else:
+        print(probe_module.render(capabilities))
+    return 0 if probe_module.enforcement_tier(capabilities) != "none" else 1
+
+
+def cmd_control_run(args: argparse.Namespace) -> int:
+    configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
+    log = get_logger("cli")
+
+    argv = args.argv[1:] if args.argv and args.argv[0] == "--" else list(args.argv)
+    if not argv:
+        log.error("control run needs a command after --")
+        return 2
+
+    try:
+        result = run_guarded(
+            argv,
+            hint=args.hint,
+            timeout=args.timeout,
+            record_path=Path(args.record) if args.record else None,
+        )
+    except Exception:
+        log_failure(log, "guarded run aborted", argv=argv, hint=args.hint)
+        return 1
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True, default=repr))
+    return result.returncode
+
+
+def cmd_control_contend(args: argparse.Namespace) -> int:
+    configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
+    log = get_logger("cli")
+
+    try:
+        result = contention.run_contention(high=args.high, low=args.low, work=args.work)
+    except Exception:
+        log_failure(log, "contention experiment aborted", high=args.high, low=args.low, work=args.work)
+        return 1
+
+    report = json.dumps(result.to_dict(), indent=2, sort_keys=True) if args.json else contention.render(result)
+
+    if args.out:
+        out_path = Path(args.out)
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(report + "\n", encoding="utf-8")
+        except OSError:
+            log_failure(log, "could not write contention report", path=str(out_path))
+            return 1
+        return 0
+
+    print(report)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cordon", description="Agent tool-call resource characterization")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -188,6 +252,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     hook_parser = subparsers.add_parser("hook", help="hook entrypoint; reads one JSON payload on stdin")
     hook_parser.set_defaults(func=cmd_hook)
+
+    control = subparsers.add_parser("control", help="Stage 2 per-tool-call resource control")
+    control_subparsers = control.add_subparsers(dest="control_command", required=True)
+
+    control_probe = control_subparsers.add_parser("probe", help="report kernel enforcement capabilities")
+    control_probe.add_argument("--json", action="store_true")
+    control_probe.set_defaults(func=cmd_control_probe)
+
+    control_run = control_subparsers.add_parser("run", help="run one command in its own ephemeral cgroup")
+    control_run.add_argument("--hint", default=None, help=f"e.g. memory:high; overrides ${INTENT_ENV}")
+    control_run.add_argument("--timeout", type=float, default=None)
+    control_run.add_argument("--record", default=None, help="append the result to this jsonl file")
+    control_run.add_argument("--json", action="store_true")
+    control_run.add_argument("argv", nargs=argparse.REMAINDER)
+    control_run.set_defaults(func=cmd_control_run)
+
+    control_contend = control_subparsers.add_parser("contend", help="synthetic CPU contention, unguarded vs guarded")
+    control_contend.add_argument("--high", type=int, default=1)
+    control_contend.add_argument("--low", type=int, default=None)
+    control_contend.add_argument("--work", type=int, default=contention.DEFAULT_WORK)
+    control_contend.add_argument("--out", default=None)
+    control_contend.add_argument("--json", action="store_true")
+    control_contend.set_defaults(func=cmd_control_contend)
 
     return parser
 
