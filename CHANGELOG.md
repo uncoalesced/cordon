@@ -136,3 +136,101 @@ File-level granularity: every commit gets a line naming the file it touched and 
   branches force-pushed. `README.md`'s references to it were removed.
 - `.gitignore` — ignore `CLAUDE.md` so it can't be re-added by accident, and the `.git-broken*`
   / `.git-oldswap*` salvage copies left behind by earlier repo repair attempts.
+
+## Unreleased — Stage 3
+
+### Multi-agent interception
+
+- `docs/stage3-multi-agent-design.md` — why one core plus thin adapters rather than a pipeline per
+  agent: five frameworks have converged on nearly the same hook contract, so the per-target work is
+  translation, not reimplementation, and an adapter is allowed to be four things only (event map,
+  field extraction, config location, config shape). Records the audit verdict per target with the
+  real captured Agent SDK payload, the two Codex findings that a stale summary would have got wrong
+  (hooks are on by default, not feature-flagged; hosted tools such as WebSearch never fire them, so
+  a Codex tool-time fraction has a different denominator), the Antigravity IDE non-firing report,
+  and exactly what would upgrade each spec-only adapter to verified. Names the Cursor open question
+  rather than dropping it, and notes Antigravity's `PreInvocation`/`PostInvocation` as a follow-on
+  that would let the reasoning-versus-tool split be measured instead of inferred — deliberately not
+  built, since it is metrics work rather than interception work.
+- `features/adapters/__init__.py` — the adapter registry and `get_adapter`, which is
+  case-insensitive and names every known tool when it rejects one, because the first thing anyone
+  types is the tool name they guessed.
+- `features/adapters/base.py` — the shared contract. `NormalizedEvent` is the one shape the core
+  consumes; `standard_extract` reads the common payload and treats every field as optional. Being
+  permissive is not laziness here: the live SDK run returned two fields (`prompt_id`,
+  `duration_ms`) that the SDK's own published types do not declare, so a strict parser would have
+  been correct per the documentation and wrong per the program. Also holds the command-hook
+  settings builder and the merge routine, so an adapter cannot independently decide how to touch a
+  user's config file.
+- `features/adapters/claude_code.py` — Stage 1's Claude-Code-specific knowledge, extracted from
+  `hook.py` unchanged in behaviour. Still the default tool, so every existing invocation keeps
+  working.
+- `features/adapters/claude_agent_sdk.py` — verified against a real agent run on this machine.
+  Field names are identical to Claude Code's, which is what made this the cheapest adapter and the
+  right one to validate the pattern with. The SDK has no `SessionStart`, so the sampler starts on
+  the first `PreToolUse` and `Stop` closes the session; `PostToolUseFailure` maps to tool-end so a
+  failed call closes its window instead of leaving an unpaired start. `hook_matchers()` returns
+  ready-made SDK objects, and the async callback is three lines at the edge that hand straight to
+  the sync path — the core stays sync per CLAUDE.md §12 rather than going async for one target.
+- `features/adapters/codex.py` — written from OpenAI's current docs, never run. Field names match
+  Claude Code's so the standard extractor is reused. Carries the hosted-tool blind spot as a caveat
+  the CLI prints on install, because a Codex dataset silently missing WebSearch time is the kind of
+  gap that gets compared against Claude Code's numbers without anyone noticing.
+- `features/adapters/antigravity.py` — the one target whose payload genuinely differs: camelCase,
+  with the call nested under `toolCall` and the session under `conversationId`, so it needs its own
+  extractor. Its reported `error` string is converted into the shared error shape inside the
+  adapter rather than by teaching the core to read a bare string as failure, which would have
+  changed how every other target's responses are interpreted. Carries the reproduction showing zero
+  hook invocations in the IDE against working hooks in the `agy` CLI, so an empty marker log there
+  is attributable to Antigravity rather than hunted for in Cordon.
+- `features/adapters/vscode.py` — written from Microsoft's current docs, never run. VS Code reads
+  Claude Code's hook format directly, so this is the Claude Code adapter with a different config
+  path: `.github/hooks/cordon.json` rather than `.claude/settings.json`, deliberately, so installing
+  for VS Code cannot silently also install for Claude Code in the same repo and double-count one
+  session. Carries the documented tool-name and casing differences as a caveat.
+- `features/wrapper/hook.py` — genericized. It no longer knows any tool's event names or field
+  names; it normalizes through an adapter, then does the parts that were always tool-independent:
+  run directory, sampler spawn, call-key derivation, marker write, and the unconditional zero exit.
+  Sampler spawn is now keyed on the normalized event rather than a hardcoded event-name set, which
+  is what lets a target with no session-start event still get sampled. `_exit_status` additionally
+  recognises `interrupted`, which is how the SDK reports a cancelled call.
+- `features/wrapper/schema.py` — `Marker` gained `adapter` and `reported_duration_ms`. The first
+  makes a mixed dataset self-describing, since a run directory no longer implies which agent
+  produced it. The second records the target's own duration where it offers one, alongside rather
+  than instead of Cordon's marker-derived figure, which includes hook dispatch on both sides.
+  Both default, so existing marker logs still read back.
+- `features/wrapper/cli.py` — `install-hooks` gained `--tool`, defaulting to `claude-code`. The
+  dry-run default, the merge-don't-overwrite behaviour and the refusal to touch an unparseable file
+  stay in one place and take the adapter's path and payload as arguments. Installing an unverified
+  adapter prints a loud banner naming it as such plus that target's caveat, so "unverified" cannot
+  quietly become "shipped". Added `cordon adapters` to list every target with its verification
+  status. The Agent SDK has no config file, so its install prints the snippet to paste into an
+  agent script rather than inventing a file the SDK does not read.
+- `pyproject.toml` — packaged `features.adapters`, and added an `sdk` extra carrying
+  `claude-agent-sdk` and `anyio` so the live integration test can run without making the SDK a
+  runtime dependency of a project whose only one is `psutil`.
+- `README.md` — added the supported-tools table with verification status, the `--tool` flag, and
+  `cordon adapters`.
+- `tests/test_adapters_base.py` — the registry, tolerant lookup, the standard extractor against
+  both a full and an empty payload, self-reported duration parsing, event mapping, merge
+  idempotency, and two contract tests over every adapter at once: each must map both tool events
+  and a session end, and each unverified one must carry a caveat explaining what that costs.
+- `tests/test_adapters_claude_agent_sdk.py` — unit coverage against the payload literally captured
+  from the live run, plus an integration test that starts a real agent, lets a real `PreToolUse`
+  and `PostToolUse` fire, and asserts the markers land in Cordon's schema. It skips cleanly when no
+  credentials are present rather than failing, so CI stays green without them.
+- `tests/test_adapters_claude_code.py` — pins the pre-refactor behaviour: same events, same
+  settings path, same pairing, now additionally tagged with the adapter name.
+- `tests/test_adapters_codex.py` — spec payload normalization including the Codex-only `turn_id`
+  and `model` fields, the full lifecycle map, settings path and shape, a paired pre/post cycle, and
+  that the hosted-tool caveat is actually present rather than assumed.
+- `tests/test_adapters_antigravity.py` — the camelCase flattening, workspace-path-to-cwd across
+  list, string and empty forms, error-to-exit-status, a missing `toolCall` degrading to empty
+  fields rather than raising, the named-hook settings object, and that merging preserves someone
+  else's hook in the same file.
+- `tests/test_adapters_vscode.py` — Claude-Code-shaped payload normalization, `Stop` closing the
+  session, and specifically that installing for VS Code leaves no `.claude/` directory behind.
+- `tests/test_cli.py` — per-tool install paths, the tool name reaching the written hook command,
+  the unverified banner appearing for a spec-only tool and staying absent for a verified one, the
+  SDK printing a snippet and writing nothing, per-tool idempotency and unparseable-file refusal,
+  and the `adapters` listing in both renderings.
