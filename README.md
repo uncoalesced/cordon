@@ -5,9 +5,11 @@ container as a whole. To most resource controllers, a `pytest` run and a `git st
 just "a subprocess." Cordon tells them apart, because one needs 500MB and the other needs 13MB,
 and a single container-wide limit can't serve both well.
 
-Right now it only measures. Stage 1 hooks into Claude Code, tracks memory and CPU per tool call,
-and turns that into a report you can compare against published numbers. Stage 2, which would
-enforce limits based on what Stage 1 finds, hasn't been built yet.
+Stage 1 measures: it hooks into Claude Code, tracks memory and CPU per tool call, and turns that
+into a report you can compare against published numbers. Stage 2 acts on what Stage 1 finds, and
+is partly built — the per-call cgroup control path and the agent-facing hint protocol work on any
+Linux with cgroup v2, while the in-kernel policy layer is still blocked on kernel features that
+aren't available yet.
 
 Grounded in AgentCgroup (arXiv 2602.09345) and AgentSight (arXiv 2508.02736).
 
@@ -39,38 +41,29 @@ for each one.
 Every hook path exits 0, no matter what happens internally. A broken measurement should never
 break the agent it's measuring.
 
-## What Stage 2 will do
+## Stage 2: control
 
-Stage 1 only watches. Stage 2 is where Cordon would start acting on what it sees, and it's
-designed but not built yet.
+Every guarded tool call gets its own ephemeral cgroup, named `tool_<pid>_<timestamp>`, created
+before the subprocess spawns and torn down after it exits. The child joins the cgroup itself,
+before `exec`, so allocations aren't missed in the gap between fork and the parent noticing.
 
-Each tool call would get its own ephemeral cgroup, created right before the subprocess spawns
-and torn down after it exits. On the CPU side (Stage 2a), a `sched_ext` policy would decide
-scheduling priority in-kernel, at microsecond speed. That matters because the alternative, a
-userspace daemon watching pressure signals and reacting, takes tens of milliseconds per round
-trip. A memory burst that lasts a second or two is often over by the time a daemon-based
-approach would even notice it.
+The limits come from what the agent said it was about to do. Before a tool call it can set
+`AGENT_RESOURCE_HINT=memory:high`, and that tier resolves to a `memory.high` soft limit and a
+`cpu.weight` for that one call. Crossing `memory.high` throttles; it doesn't kill. Hints are
+advisory — the agent can be wrong, and nothing here trusts one beyond setting a soft limit.
 
-On the memory side (Stage 2b), each cgroup would get a `memory.high` soft limit. Crossing it
-doesn't kill anything by default; it triggers reclaim pressure. A `memcg_bpf_ops` hook would
-decide how long to throttle a call that crosses its limit, and only escalate to freezing the
-process, not killing it, if throttling alone isn't enough. Killing a tool call mid-run destroys
-whatever context the agent had built up to that point, and a retried agent doesn't reliably
-reach the same solution twice, so a kill is treated as a last resort rather than the default
-response to pressure.
+Feedback goes the other way too. If a call stalls past a threshold, or gets frozen, or gets
+OOM-killed, Cordon appends a plain-English note to that call's stderr naming the peak, the limit,
+and how long it stalled. The agent reads its own tool output on the next turn, so it sees that
+note as part of the result and can narrow its scope or declare a higher tier, rather than just
+failing and retrying the same thing.
 
-The other half of Stage 2 is a feedback loop, not just a limit. An agent could set an
-environment variable before a tool call, something like `AGENT_RESOURCE_HINT=memory:high`
-before running a test suite, to hint at what it's about to need. That hint is advisory, not
-binding; the system doesn't have to trust it. Going the other way, if a call gets throttled or
-frozen past some threshold, Cordon would write a plain-English note to that call's stderr, for
-example that it peaked at 3.5GB and got throttled for 340ms. Since the agent reads its own tool
-output on the next turn, it would see that note as part of the result and could adjust rather
-than just failing silently.
-
-Stage 2a needs a Linux 6.12+ machine, which is where `sched_ext` shipped. Stage 2b needs more:
-`memcg_bpf_ops` is a kernel patch series, not yet merged upstream, so it either needs a
-self-built patched kernel or waiting for the RFC to land.
+What isn't built is the in-kernel policy layer. `sched_ext` (CPU) needs Linux 6.12+, and
+`memcg_bpf_ops` (memory) is still an unmerged RFC patch series. Both let throttling decisions
+happen in-kernel in microseconds instead of in a userspace daemon at tens of milliseconds, which
+matters against bursts that last a second or two. Neither is stubbed or simulated — `cordon
+control probe` reports what the machine actually has, and the code runs at whatever tier that
+allows. `docs/stage2-design.md` covers what unblocks what.
 
 ## Install
 
@@ -104,11 +97,35 @@ Once you've reduced a batch of sessions, characterize the whole set:
 
 Pass `--json` instead of `--out` for the raw numbers rather than the rendered report.
 
+## Use: control
+
+Check what the machine can actually enforce:
+
+```
+.venv\Scripts\cordon.exe control probe
+```
+
+Run one command under a per-call cgroup, with a declared hint:
+
+```
+.venv\Scripts\cordon.exe control run --hint memory:high -- pytest tests/
+```
+
+The command's exit code passes through unchanged. On a machine without cgroup v2 the command
+still runs; Cordon logs what it would have applied and enforces nothing.
+
+Measure what the enforcement is worth under CPU contention:
+
+```
+.venv\Scripts\cordon.exe control contend --out docs\stage2-contention.md
+```
+
 ## Layout
 
 ```
 features/wrapper/   sampler, hook entrypoint, reducer, JSON-lines schema
 features/analysis/  characterization passes over reduced tool-call records
+features/control/   capability probe, intent protocol, cgroup backends, guarded runner
 docs/                design notes and findings
 tests/                pytest suite
 ```
@@ -121,6 +138,10 @@ tests/                pytest suite
 - `docs/stage1-findings.md` compares measured results against the papers' numbers. It's
   generated by `cordon analyze` and currently holds methodology and known structural
   differences; the results table fills in once a real task batch has been run.
+- `docs/stage2-design.md` records which kernel features are available and which are blocking
+  what, why the hint protocol uses tiers rather than absolute byte counts, what throttle
+  threshold triggers feedback to the agent and why that number, and what was deliberately not
+  built while the kernel side is gated.
 
 ## License
 
