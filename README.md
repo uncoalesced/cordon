@@ -6,7 +6,7 @@ own hooks — no forking, no root, no cgroups yet.
 Existing resource controllers see "a subprocess." Cordon sees "a `pytest` run that needs
 500MB" versus "a `git status` that needs 13MB." Right now it only *measures* that difference
 (Stage 1); the point is to eventually *act* on it (Stage 2). Grounded in AgentCgroup
-(arXiv 2602.09345) and AgentSight (arXiv 2508.02736); see [CLAUDE.md](CLAUDE.md) for the full spec.
+(arXiv 2602.09345) and AgentSight (arXiv 2508.02736).
 
 ## What's actually built (Stage 1)
 
@@ -27,7 +27,7 @@ Existing resource controllers see "a subprocess." Cordon sees "a `pytest` run th
   agent being measured.
 
 Stages 2a (`sched_ext`, CPU enforcement) and 2b (`memcg_bpf_ops`, memory enforcement) are
-spec'd in CLAUDE.md but not started; both need a Linux 6.12+ box.
+spec'd but not started; both need a Linux 6.12+ box.
 
 ## Install
 
