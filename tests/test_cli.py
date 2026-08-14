@@ -68,6 +68,50 @@ def test_sample_command_writes_a_stream(tmp_path: Path):
     assert (run_dir / SAMPLES_FILENAME).exists()
 
 
+def test_analyze_on_an_empty_root_still_reports(tmp_path: Path, capsys):
+    assert main(["analyze", "--runs", str(tmp_path)]) == 0
+    assert "## No dataset yet" in capsys.readouterr().out
+
+
+def test_analyze_writes_a_report_file(tmp_path: Path):
+    out = tmp_path / "docs" / "findings.md"
+    assert main(["analyze", "--runs", str(tmp_path / "runs"), "--out", str(out), "--title", "Batch 1"]) == 0
+    assert out.read_text(encoding="utf-8").startswith("# Batch 1")
+
+
+def test_analyze_emits_json(tmp_path: Path, capsys):
+    assert main(["analyze", "--runs", str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["n_runs"] == 0
+
+
+def test_analyze_reports_measured_numbers(tmp_path: Path, capsys):
+    run_dir = tmp_path / "runs" / "sess"
+    with JsonlWriter(run_dir / MARKERS_FILENAME) as writer:
+        writer.write(Marker(event="tool_start", ts=1.0, session_id="sess", call_key="k", tool_type="Bash", command="pytest -q"))
+        writer.write(Marker(event="tool_end", ts=3.0, session_id="sess", call_key="k"))
+    with JsonlWriter(run_dir / SAMPLES_FILENAME) as writer:
+        for t, mem in [(0.0, 200.0), (1.5, 900.0), (2.5, 400.0), (4.0, 210.0)]:
+            writer.write(Sample(t=t, mem_mb=mem, cpu_pct=20.0))
+
+    assert main(["reduce", "--run-dir", str(run_dir)]) == 0
+    capsys.readouterr()
+    assert main(["analyze", "--runs", str(tmp_path / "runs"), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["n_runs"] == 1
+    assert payload["n_toolcalls"] == 1
+    assert payload["tool_types"][0]["tool_type"] == "Bash"
+    assert payload["bash_categories"][0]["tool_type"] == "test"
+
+
+def test_analyze_aborts_cleanly_when_loading_explodes(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "features.wrapper.cli.load_dataset",
+        lambda _root: (_ for _ in ()).throw(RuntimeError("disk on fire")),
+    )
+    assert main(["analyze", "--runs", str(tmp_path)]) == 1
+
+
 def test_parser_requires_a_subcommand(capsys):
     parser = build_parser()
     try:
