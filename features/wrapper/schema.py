@@ -98,6 +98,26 @@ class ToolCallRecord:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "ToolCallRecord":
+        return cls(
+            task_id=str(raw.get("task_id", "")),
+            tool_type=str(raw.get("tool_type", "")),
+            command=str(raw.get("command", "")),
+            start_ts=float(raw["start_ts"]),
+            end_ts=float(raw["end_ts"]),
+            peak_memory_mb=float(raw.get("peak_memory_mb", 0.0)),
+            avg_memory_mb=float(raw.get("avg_memory_mb", 0.0)),
+            avg_cpu_pct=float(raw.get("avg_cpu_pct", 0.0)),
+            samples=list(raw.get("samples") or []),
+            call_key=str(raw.get("call_key", "")),
+            duration_s=float(raw.get("duration_s", 0.0)),
+            n_samples=int(raw.get("n_samples", 0)),
+            exit_status=str(raw.get("exit_status", "")),
+            hook_overhead_ms=float(raw.get("hook_overhead_ms", 0.0)),
+            schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
+        )
+
 
 def call_key_for(session_id: str, tool_name: str, tool_input: Any, tool_use_id: str = "") -> str:
     if tool_use_id:
