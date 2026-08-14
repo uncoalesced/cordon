@@ -19,6 +19,14 @@ runs/
 *.jsonl
 !docs/data/*.jsonl
 
+# Local-only agent spec. Removed from git history entirely (git filter-repo) since the repo
+# is public; this just stops it from being re-added by accident.
+CLAUDE.md
+
+# Salvage copies left behind by git repair attempts.
+.git-broken*/
+.git-oldswap*/
+
 .idea/
 .vscode/
 *.swp
