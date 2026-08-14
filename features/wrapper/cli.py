@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from features.adapters import ADAPTERS, DEFAULT_ADAPTER, get_adapter
+from features.adapters.claude_code import CONFIG_EVENTS as HOOK_EVENTS
 from features.analysis.dataset import load_dataset
 from features.analysis.metrics import BURST_THRESHOLD_MB, analyze_dataset
 from features.analysis.report import render_report
@@ -19,39 +21,23 @@ from features.wrapper.reduce import reduce_run
 from features.wrapper.sampler import DEFAULT_INTERVAL_S, resolve_agent_root, run_sampler
 from features.wrapper.schema import RUN_LOG_FILENAME
 
-HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "SessionEnd")
 
-
-def _hook_command() -> str:
+def _hook_command(tool: str = DEFAULT_ADAPTER) -> str:
     script = Path(sys.executable).with_name("cordon.exe" if os.name == "nt" else "cordon")
     if script.exists():
-        return f'"{script}" hook'
-    return f'"{sys.executable}" -m features.wrapper.cli hook'
+        return f'"{script}" hook --tool {tool}'
+    return f'"{sys.executable}" -m features.wrapper.cli hook --tool {tool}'
 
 
-def hook_settings() -> dict[str, Any]:
-    entry = {"matcher": "*", "hooks": [{"type": "command", "command": _hook_command()}]}
-    return {"hooks": {event: [dict(entry)] for event in HOOK_EVENTS}}
+def hook_settings(tool: str = DEFAULT_ADAPTER) -> dict[str, Any]:
+    adapter = get_adapter(tool)
+    if adapter.build_settings is None:
+        return {}
+    return adapter.build_settings(_hook_command(adapter.name))
 
 
-def _merge_hooks(existing: dict[str, Any], additions: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(existing)
-    hooks = dict(merged.get("hooks") or {})
-    for event, entries in additions["hooks"].items():
-        current = list(hooks.get(event) or [])
-        commands = {
-            h.get("command")
-            for group in current
-            if isinstance(group, dict)
-            for h in (group.get("hooks") or [])
-            if isinstance(h, dict)
-        }
-        for entry in entries:
-            if entry["hooks"][0]["command"] not in commands:
-                current.append(entry)
-        hooks[event] = current
-    merged["hooks"] = hooks
-    return merged
+def _merge_hooks(existing: dict[str, Any], additions: dict[str, Any], tool: str = DEFAULT_ADAPTER) -> dict[str, Any]:
+    return get_adapter(tool).merge(existing, additions)
 
 
 def cmd_sample(args: argparse.Namespace) -> int:
@@ -123,8 +109,18 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
     configure(level=logging.INFO)
     log = get_logger("cli")
 
-    settings_path = Path(args.target) / ".claude" / "settings.json"
-    additions = hook_settings()
+    try:
+        adapter = get_adapter(args.tool)
+    except KeyError as exc:
+        log.error("%s", exc)
+        return 2
+
+    if not adapter.writes_config:
+        print(_snippet_for(adapter))
+        return 0
+
+    settings_path = adapter.settings_path_for(args.target)
+    additions = adapter.build_settings(_hook_command(adapter.name))
 
     existing: dict[str, Any] = {}
     if settings_path.exists():
@@ -134,11 +130,12 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
             log_failure(log, "existing settings unreadable, refusing to overwrite", path=str(settings_path))
             return 1
 
-    merged = _merge_hooks(existing, additions)
+    merged = adapter.merge(existing, additions)
     rendered = json.dumps(merged, indent=2)
 
+    banner = _caveat_banner(adapter)
     if not args.write:
-        print(f"# dry run: would write {settings_path}\n# re-run with --write to apply\n{rendered}")
+        print(f"{banner}# dry run: would write {settings_path}\n# re-run with --write to apply\n{rendered}")
         return 0
 
     try:
@@ -148,12 +145,72 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
         log_failure(log, "could not write settings", path=str(settings_path))
         return 1
 
-    log.info("hooks installed | path=%s", settings_path)
+    if banner:
+        print(banner, end="")
+    log.info("hooks installed | tool=%s path=%s", adapter.name, settings_path)
     return 0
 
 
-def cmd_hook(_args: argparse.Namespace) -> int:
-    return hook_module.main()
+def _caveat_banner(adapter: Any) -> str:
+    if adapter.verification == "live" and not adapter.caveat:
+        return ""
+    lines = []
+    if adapter.verification != "live":
+        lines.append(f"# UNVERIFIED ADAPTER ({adapter.name}): built from vendor docs, never run against a real event.")
+    for line in _wrap(adapter.caveat):
+        lines.append(f"# {line}")
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def _wrap(text: str, width: int = 96) -> list[str]:
+    if not text:
+        return []
+    import textwrap
+
+    return textwrap.wrap(text, width=width)
+
+
+def _snippet_for(adapter: Any) -> str:
+    banner = _caveat_banner(adapter)
+    return (
+        f"{banner}# {adapter.name} registers hooks in code, not in a config file.\n"
+        "# Add this to the script that builds your agent:\n"
+        "#\n"
+        "#     from features.adapters.claude_agent_sdk import hook_matchers\n"
+        "#     options = ClaudeAgentOptions(hooks=hook_matchers())\n"
+    )
+
+
+def cmd_adapters(args: argparse.Namespace) -> int:
+    configure(level=logging.INFO, to_stderr=False)
+    rows = [
+        {
+            "tool": adapter.name,
+            "verification": adapter.verification,
+            "config": "/".join(adapter.settings_relpath) if adapter.writes_config else "(in code)",
+            "description": adapter.description,
+            "caveat": adapter.caveat,
+        }
+        for adapter in sorted(ADAPTERS.values(), key=lambda a: a.name)
+    ]
+
+    if args.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+
+    width = max(len(row["tool"]) for row in rows)
+    print("Cordon interception adapters. 'live' saw a real payload; 'docs' never has.\n")
+    for row in rows:
+        print(f"  {row['tool'].ljust(width)}  {row['verification'].ljust(5)}  {row['config']}")
+        print(f"  {' '.ljust(width)}  {row['description']}")
+        for line in _wrap(row["caveat"], width=88):
+            print(f"  {' '.ljust(width)}  ! {line}")
+        print()
+    return 0
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    return hook_module.main(tool=getattr(args, "tool", None))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -181,12 +238,18 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--title", default="Stage 1 — Characterization Findings")
     analyze.set_defaults(func=cmd_analyze)
 
-    install = subparsers.add_parser("install-hooks", help="print or write Claude Code hook settings")
+    install = subparsers.add_parser("install-hooks", help="print or write hook settings for one agent tool")
     install.add_argument("--target", required=True)
+    install.add_argument("--tool", default=DEFAULT_ADAPTER, choices=sorted(ADAPTERS))
     install.add_argument("--write", action="store_true")
     install.set_defaults(func=cmd_install_hooks)
 
+    adapters_parser = subparsers.add_parser("adapters", help="list interception adapters and their verification status")
+    adapters_parser.add_argument("--json", action="store_true")
+    adapters_parser.set_defaults(func=cmd_adapters)
+
     hook_parser = subparsers.add_parser("hook", help="hook entrypoint; reads one JSON payload on stdin")
+    hook_parser.add_argument("--tool", default=DEFAULT_ADAPTER)
     hook_parser.set_defaults(func=cmd_hook)
 
     return parser
