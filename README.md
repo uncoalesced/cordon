@@ -1,33 +1,46 @@
 # Cordon
 
-Tool-call-granularity resource characterization for AI coding agents, built on Claude Code's
-own hooks — no forking, no root, no cgroups yet.
+Cordon watches what an AI coding agent does at the level of individual tool calls, not the
+container as a whole. To most resource controllers, a `pytest` run and a `git status` are both
+just "a subprocess." Cordon tells them apart, because one needs 500MB and the other needs 13MB,
+and a single container-wide limit can't serve both well.
 
-Existing resource controllers see "a subprocess." Cordon sees "a `pytest` run that needs
-500MB" versus "a `git status` that needs 13MB." Right now it only *measures* that difference
-(Stage 1); the point is to eventually *act* on it (Stage 2). Grounded in AgentCgroup
-(arXiv 2602.09345) and AgentSight (arXiv 2508.02736).
+Right now it only measures. Stage 1 hooks into Claude Code, tracks memory and CPU per tool call,
+and turns that into a report you can compare against published numbers. Stage 2, which would
+enforce limits based on what Stage 1 finds, hasn't been built yet.
 
-## What's actually built (Stage 1)
+Grounded in AgentCgroup (arXiv 2602.09345) and AgentSight (arXiv 2508.02736).
 
-- `cordon install-hooks` wires `PreToolUse` / `PostToolUse` / `SessionStart` / `SessionEnd`
-  in `.claude/settings.json` to `cordon hook`.
-- On the first tool call, the hook spawns one background sampler for the whole session
-  (`cordon sample`) rather than one per tool call — a fresh process per call would cost
-  ~100ms and contaminate the measurement it's trying to take.
-- The sampler walks up from the hook process to find the agent root (e.g. `claude.exe`),
-  then polls RSS + CPU% across its *entire process tree* every 250ms and appends to
-  `samples.jsonl`. Each `PreToolUse`/`PostToolUse` writes a timestamped marker to
-  `markers.jsonl`.
-- `cordon reduce` joins the two streams into one JSON record per tool call in
-  `toolcalls.jsonl`: start/end timestamps, peak/avg memory, avg CPU, and the raw
-  per-tick samples for that call's window (kept, not just aggregated, so burst-shape
-  analysis is possible later).
-- Every hook path exits 0 unconditionally — a broken measurement must never break the
-  agent being measured.
+## What's built
 
-Stages 2a (`sched_ext`, CPU enforcement) and 2b (`memcg_bpf_ops`, memory enforcement) are
-spec'd but not started; both need a Linux 6.12+ box.
+Cordon installs as four Claude Code hooks: `SessionStart`, `PreToolUse`, `PostToolUse`, and
+`SessionEnd`, all routed through `cordon hook`.
+
+When the first tool call fires, the hook starts one background sampler for the whole session
+instead of spawning a fresh process per call. A process per call would add around 100ms of
+startup overhead inside the same window it's trying to measure, which would contaminate the
+result.
+
+The sampler walks up from the hook process to find the agent's root process (`claude.exe` on
+Windows), then polls memory and CPU across its entire process tree every 250ms, appending to
+`samples.jsonl`. Each `PreToolUse` and `PostToolUse` event writes a timestamped marker to
+`markers.jsonl`.
+
+`cordon reduce` joins the two streams into one record per tool call: start and end time, peak
+and average memory, average CPU, and the raw per-tick samples for that call's window. The raw
+samples are kept rather than discarded after aggregation, since later analysis needs them to
+look at burst shape, not just averages.
+
+`cordon analyze` runs the reduced data through five characterization passes (execution time
+split, peak-to-average memory ratio, per-tool breakdown, retry-loop detection, CPU/memory
+correlation) plus two burst measures, then renders a report with a measured-versus-paper verdict
+for each one.
+
+Every hook path exits 0, no matter what happens internally. A broken measurement should never
+break the agent it's measuring.
+
+Stage 2a (CPU enforcement via `sched_ext`) and Stage 2b (memory enforcement via
+`memcg_bpf_ops`) are designed but not started. Both need a Linux 6.12+ machine.
 
 ## Install
 
@@ -38,44 +51,47 @@ python -m venv .venv
 
 ## Use
 
-Install the hooks into the repo where the agent will actually do its work:
+Point Cordon at the repo where the agent will actually work:
 
 ```
 .venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --write
 ```
 
-(omit `--write` to preview the settings.json merge without touching anything)
+Drop `--write` first if you want to see the settings.json merge before anything gets touched.
 
-Run the agent normally. Cordon writes a per-session sample stream and marker log under
-`runs/<session-id>/`. Once the session ends, reduce those into one JSON line per tool call:
+Run the agent normally. Cordon writes a sample stream and marker log per session under
+`runs\<session-id>\`. Once the session ends, reduce it into one record per tool call:
 
 ```
 .venv\Scripts\cordon.exe reduce --run-dir runs\<session-id>
 ```
 
-Once a batch of sessions is reduced, characterize the lot against the paper's findings:
+Once you've reduced a batch of sessions, characterize the whole set:
 
 ```
 .venv\Scripts\cordon.exe analyze --runs runs --out docs\stage1-findings.md
 ```
 
-That computes the execution split, peak/avg memory ratios, per-tool-type and Bash-category
-breakdowns, retry-loop prevalence, CPU/memory correlation, and burst concentration — each with
-a measured-versus-paper verdict. `--json` emits the raw numbers instead of the report.
+Pass `--json` instead of `--out` for the raw numbers rather than the rendered report.
 
 ## Layout
 
 ```
 features/wrapper/   sampler, hook entrypoint, reducer, JSON-lines schema
 features/analysis/  characterization passes over reduced tool-call records
-docs/               design notes and findings
-tests/              pytest suite
+docs/                design notes and findings
+tests/                pytest suite
 ```
 
 ## Docs
 
-- [docs/stage1-design.md](docs/stage1-design.md) — how interception, sampling and the analysis
-  passes actually work, and why
-- [docs/stage1-findings.md](docs/stage1-findings.md) — comparison against the paper's numbers.
-  Generated by `cordon analyze`; currently holds the methodology and the known structural
-  divergences, with measured results pending a task batch.
+- `docs/stage1-design.md` explains why interception happens through Claude Code's hooks
+  instead of forking the agent, why sampling runs as one continuous process per session
+  instead of one per call, and what that costs in measured overhead.
+- `docs/stage1-findings.md` compares measured results against the papers' numbers. It's
+  generated by `cordon analyze` and currently holds methodology and known structural
+  differences; the results table fills in once a real task batch has been run.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
