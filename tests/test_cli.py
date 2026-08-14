@@ -14,7 +14,7 @@ def test_hook_settings_covers_every_lifecycle_event():
     settings = hook_settings()
     assert set(settings["hooks"]) == set(HOOK_EVENTS)
     for event in HOOK_EVENTS:
-        assert settings["hooks"][event][0]["hooks"][0]["command"].endswith("hook")
+        assert settings["hooks"][event][0]["hooks"][0]["command"].endswith("hook --tool claude-code")
 
 
 def test_merge_hooks_preserves_unrelated_settings():
@@ -110,6 +110,73 @@ def test_analyze_aborts_cleanly_when_loading_explodes(tmp_path: Path, monkeypatc
         lambda _root: (_ for _ in ()).throw(RuntimeError("disk on fire")),
     )
     assert main(["analyze", "--runs", str(tmp_path)]) == 1
+
+
+def test_install_hooks_writes_each_tool_to_its_own_path(tmp_path: Path):
+    for tool, relpath in (
+        ("claude-code", Path(".claude") / "settings.json"),
+        ("codex", Path(".codex") / "hooks.json"),
+        ("antigravity", Path(".agents") / "hooks.json"),
+        ("vscode", Path(".github") / "hooks" / "cordon.json"),
+    ):
+        assert main(["install-hooks", "--target", str(tmp_path), "--tool", tool, "--write"]) == 0
+        assert json.loads((tmp_path / relpath).read_text(encoding="utf-8"))
+
+
+def test_install_hooks_carries_the_tool_into_the_hook_command(tmp_path: Path):
+    assert main(["install-hooks", "--target", str(tmp_path), "--tool", "codex", "--write"]) == 0
+    written = (tmp_path / ".codex" / "hooks.json").read_text(encoding="utf-8")
+    assert "hook --tool codex" in written
+
+
+def test_install_hooks_warns_loudly_for_an_unverified_tool(tmp_path: Path, capsys):
+    assert main(["install-hooks", "--target", str(tmp_path), "--tool", "antigravity"]) == 0
+    out = capsys.readouterr().out
+    assert "UNVERIFIED ADAPTER (antigravity)" in out
+    assert "zero hook invocations" in out
+
+
+def test_install_hooks_stays_quiet_for_a_verified_tool(tmp_path: Path, capsys):
+    assert main(["install-hooks", "--target", str(tmp_path), "--tool", "claude-code"]) == 0
+    assert "UNVERIFIED" not in capsys.readouterr().out
+
+
+def test_install_hooks_for_the_sdk_prints_a_snippet_and_writes_nothing(tmp_path: Path, capsys):
+    assert main(["install-hooks", "--target", str(tmp_path), "--tool", "claude-agent-sdk", "--write"]) == 0
+    assert list(tmp_path.iterdir()) == []
+    assert "hook_matchers()" in capsys.readouterr().out
+
+
+def test_install_hooks_is_idempotent_per_tool(tmp_path: Path):
+    path = tmp_path / ".codex" / "hooks.json"
+    main(["install-hooks", "--target", str(tmp_path), "--tool", "codex", "--write"])
+    once = path.read_text(encoding="utf-8")
+    main(["install-hooks", "--target", str(tmp_path), "--tool", "codex", "--write"])
+    assert path.read_text(encoding="utf-8") == once
+
+
+def test_install_hooks_refuses_an_unparseable_file_for_any_tool(tmp_path: Path):
+    path = tmp_path / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{ broken", encoding="utf-8")
+    assert main(["install-hooks", "--target", str(tmp_path), "--tool", "codex", "--write"]) == 1
+    assert path.read_text(encoding="utf-8") == "{ broken"
+
+
+def test_adapters_lists_every_tool_with_its_verification(capsys):
+    assert main(["adapters"]) == 0
+    out = capsys.readouterr().out
+    for tool in ("claude-code", "claude-agent-sdk", "codex", "antigravity", "vscode"):
+        assert tool in out
+    assert "live" in out and "docs" in out
+
+
+def test_adapters_emits_json(capsys):
+    assert main(["adapters", "--json"]) == 0
+    rows = {row["tool"]: row for row in json.loads(capsys.readouterr().out)}
+    assert rows["claude-agent-sdk"]["verification"] == "live"
+    assert rows["antigravity"]["verification"] == "docs"
+    assert rows["claude-agent-sdk"]["config"] == "(in code)"
 
 
 def test_parser_requires_a_subcommand(capsys):
