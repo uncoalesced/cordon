@@ -33,8 +33,14 @@ def test_sample_once_measures_the_current_process():
 def test_sample_once_includes_children(busy_child):
     sampler = TreeSampler(root_pid=os.getpid())
     before = sampler.sample_once()
-    busy_child(duration=10.0)
+    busy_child(duration=30.0)
+
+    deadline = time.monotonic() + 20.0
     after = sampler.sample_once()
+    while after.mem_mb <= before.mem_mb and time.monotonic() < deadline:
+        time.sleep(0.05)
+        after = sampler.sample_once()
+
     assert after.n_procs > before.n_procs
     assert after.mem_mb > before.mem_mb
 
