@@ -12,6 +12,8 @@ from typing import Any
 
 import psutil
 
+from features.adapters import get_adapter
+from features.adapters.base import Adapter
 from features.wrapper.logging_setup import configure, get_logger, log_failure
 from features.wrapper.sampler import DEFAULT_INTERVAL_S, resolve_agent_root, stop_file
 from features.wrapper.schema import (
@@ -30,13 +32,11 @@ from features.wrapper.schema import (
 ENV_RUN_ROOT = "CORDON_RUN_ROOT"
 ENV_INTERVAL = "CORDON_INTERVAL"
 ENV_DISABLE = "CORDON_DISABLE"
+ENV_TOOL = "CORDON_TOOL"
 
 SAMPLER_PID_FILENAME = "sampler.pid"
 
-_START_EVENTS = {"SessionStart"}
-_END_EVENTS = {"SessionEnd", "Stop"}
-_PRE_EVENTS = {"PreToolUse"}
-_POST_EVENTS = {"PostToolUse"}
+_SPAWNING_EVENTS = {EVENT_SESSION_START, EVENT_TOOL_START}
 
 _UNKNOWN_SESSION = "unknown-session"
 
@@ -132,13 +132,22 @@ def spawn_sampler(run_dir: Path, agent_pid: int, interval: float) -> int | None:
     return proc.pid
 
 
-def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | None = None) -> Marker | None:
+def handle(
+    payload: dict[str, Any],
+    run_root: Path | None = None,
+    now: float | None = None,
+    adapter: Adapter | None = None,
+) -> Marker | None:
     log = get_logger("hook")
     now = time.time() if now is None else now
     run_root = default_run_root() if run_root is None else Path(run_root)
+    adapter = get_adapter(os.environ.get(ENV_TOOL)) if adapter is None else adapter
 
-    event_name = str(payload.get("hook_event_name", ""))
-    session_id = str(payload.get("session_id") or _UNKNOWN_SESSION)
+    normalized = adapter.normalize(payload)
+    if not normalized.event:
+        return None
+
+    session_id = normalized.session_id or _UNKNOWN_SESSION
     run_dir = run_root / session_id
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -147,55 +156,32 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
         return None
     configure(log_path=run_dir / RUN_LOG_FILENAME, to_stderr=False)
 
-    tool_name = str(payload.get("tool_name", ""))
-    tool_input = payload.get("tool_input", {})
-    tool_use_id = str(payload.get("tool_use_id", "") or "")
     agent_pid = resolve_agent_root()
+    marker = Marker(
+        event=normalized.event,
+        ts=now,
+        session_id=session_id,
+        cwd=normalized.cwd,
+        agent_pid=agent_pid,
+        adapter=adapter.name,
+        reported_duration_ms=normalized.reported_duration_ms,
+    )
 
-    if event_name in _START_EVENTS:
-        marker = Marker(
-            event=EVENT_SESSION_START,
-            ts=now,
-            session_id=session_id,
-            cwd=str(payload.get("cwd", "")),
-            agent_pid=agent_pid,
+    if normalized.event in (EVENT_TOOL_START, EVENT_TOOL_END):
+        marker.call_key = call_key_for(
+            session_id, normalized.tool_name, normalized.tool_input, normalized.tool_use_id
         )
+        marker.tool_type = normalized.tool_name
+        marker.command = summarize_command(normalized.tool_name, normalized.tool_input)
+
+    if normalized.event == EVENT_TOOL_END:
+        marker.exit_status = _exit_status(normalized.tool_response)
+
+    if normalized.event in _SPAWNING_EVENTS:
         spawn_sampler(run_dir, agent_pid, _interval())
-    elif event_name in _PRE_EVENTS:
-        marker = Marker(
-            event=EVENT_TOOL_START,
-            ts=now,
-            session_id=session_id,
-            call_key=call_key_for(session_id, tool_name, tool_input, tool_use_id),
-            tool_type=tool_name,
-            command=summarize_command(tool_name, tool_input),
-            cwd=str(payload.get("cwd", "")),
-            agent_pid=agent_pid,
-        )
-        spawn_sampler(run_dir, agent_pid, _interval())
-    elif event_name in _POST_EVENTS:
-        marker = Marker(
-            event=EVENT_TOOL_END,
-            ts=now,
-            session_id=session_id,
-            call_key=call_key_for(session_id, tool_name, tool_input, tool_use_id),
-            tool_type=tool_name,
-            command=summarize_command(tool_name, tool_input),
-            cwd=str(payload.get("cwd", "")),
-            exit_status=_exit_status(payload.get("tool_response")),
-            agent_pid=agent_pid,
-        )
-    elif event_name in _END_EVENTS:
-        marker = Marker(
-            event=EVENT_SESSION_END,
-            ts=now,
-            session_id=session_id,
-            agent_pid=agent_pid,
-        )
+
+    if normalized.event == EVENT_SESSION_END:
         stop_file(run_dir).touch()
-    else:
-        log.warning("ignoring unrecognised hook event | event=%r session=%s", event_name, session_id)
-        return None
 
     marker.hook_overhead_ms = round((time.time() - _process_start_time(os.getpid())) * 1000.0, 3)
 
@@ -211,17 +197,25 @@ def _exit_status(tool_response: Any) -> str:
                 return str(tool_response[key])
         if tool_response.get("is_error") or tool_response.get("isError"):
             return "error"
+        if tool_response.get("interrupted"):
+            return "interrupted"
         return "ok"
     if tool_response is None:
         return ""
     return "ok"
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, tool: str | None = None) -> int:
     log = get_logger("hook")
 
     if os.environ.get(ENV_DISABLE):
         return 0
+
+    try:
+        adapter = get_adapter(tool or os.environ.get(ENV_TOOL))
+    except KeyError:
+        log_failure(log, "unknown tool, falling back to the default adapter", tool=tool)
+        adapter = get_adapter()
 
     raw = ""
     try:
@@ -232,11 +226,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        handle(payload)
+        handle(payload, adapter=adapter)
     except Exception:
         log_failure(
             log,
             "hook handling failed, agent unaffected",
+            tool=adapter.name,
             event=payload.get("hook_event_name"),
             session_id=payload.get("session_id"),
             tool_name=payload.get("tool_name"),
