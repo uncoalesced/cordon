@@ -57,6 +57,8 @@ class Marker:
     exit_status: str = ""
     hook_overhead_ms: float = 0.0
     agent_pid: int = 0
+    adapter: str = ""
+    reported_duration_ms: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -74,6 +76,8 @@ class Marker:
             exit_status=str(raw.get("exit_status", "")),
             hook_overhead_ms=float(raw.get("hook_overhead_ms", 0.0)),
             agent_pid=int(raw.get("agent_pid", 0)),
+            adapter=str(raw.get("adapter", "")),
+            reported_duration_ms=float(raw.get("reported_duration_ms", 0.0)),
         )
 
 
