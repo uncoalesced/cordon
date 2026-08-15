@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -124,6 +125,32 @@ def test_control_probe_emits_json(capsys):
     main(["control", "probe", "--json"])
     names = {cap["name"] for cap in json.loads(capsys.readouterr().out)}
     assert "sched_ext" in names
+
+
+def test_control_probe_runs_on_a_host_without_psutil():
+    # The probe exists to be the first thing run on an unknown machine, so it must not need
+    # psutil, which does not build everywhere (Android is one). Run in a subprocess with psutil
+    # blocked at import, because the CLI is already imported in this one.
+    script = (
+        "import builtins, sys\n"
+        "_real = builtins.__import__\n"
+        "def _guard(name, *a, **k):\n"
+        "    if name == 'psutil' or name.startswith('psutil.'):\n"
+        "        raise ImportError('No module named psutil')\n"
+        "    return _real(name, *a, **k)\n"
+        "builtins.__import__ = _guard\n"
+        "from features.wrapper.cli import main\n"
+        "sys.exit(main(['control', 'probe']))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    assert "psutil" not in proc.stderr
+    assert "enforcement tier:" in proc.stdout
+    assert proc.returncode in (0, 1)
 
 
 def test_control_run_passes_the_exit_code_through():
