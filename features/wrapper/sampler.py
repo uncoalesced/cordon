@@ -10,9 +10,8 @@ from typing import Callable
 import psutil
 
 from features.wrapper.logging_setup import get_logger, log_failure
-from features.wrapper.schema import SAMPLES_FILENAME, JsonlWriter, Sample
+from features.wrapper.schema import DEFAULT_INTERVAL_S, SAMPLES_FILENAME, JsonlWriter, Sample
 
-DEFAULT_INTERVAL_S = 0.25
 STOP_FILENAME = "STOP"
 
 AGENT_PROCESS_NAMES = {"node", "node.exe", "claude", "claude.exe", "bun", "bun.exe"}
