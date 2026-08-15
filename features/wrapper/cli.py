@@ -16,11 +16,14 @@ from features.analysis.report import render_report
 from features.control import contention, probe as probe_module
 from features.control.guard import run_guarded
 from features.control.intent import ENV_HINT as INTENT_ENV
-from features.wrapper import hook as hook_module
 from features.wrapper.logging_setup import configure, get_logger, log_failure
 from features.wrapper.reduce import reduce_run
-from features.wrapper.sampler import DEFAULT_INTERVAL_S, resolve_agent_root, run_sampler
-from features.wrapper.schema import RUN_LOG_FILENAME
+from features.wrapper.schema import DEFAULT_INTERVAL_S, RUN_LOG_FILENAME
+
+# features.wrapper.sampler and .hook import psutil at module scope, and psutil does not build
+# on every host Cordon has to report on. They are imported inside the commands that need them
+# so that `cordon control probe` — the command whose job is to run first on an unknown box —
+# does not require psutil to answer. See docs/stage2-host-audit.md.
 
 HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "SessionEnd")
 
@@ -58,17 +61,20 @@ def _merge_hooks(existing: dict[str, Any], additions: dict[str, Any]) -> dict[st
 
 
 def cmd_sample(args: argparse.Namespace) -> int:
+    from features.wrapper.sampler import resolve_agent_root, run_sampler
+
     run_dir = Path(args.run_dir)
     configure(log_path=run_dir / RUN_LOG_FILENAME, level=logging.DEBUG if args.verbose else logging.INFO)
     log = get_logger("cli")
 
+    interval = DEFAULT_INTERVAL_S if args.interval is None else args.interval
     pid = args.pid if args.pid else resolve_agent_root()
-    log.info("sampling | run_dir=%s pid=%s interval=%s", run_dir, pid, args.interval)
+    log.info("sampling | run_dir=%s pid=%s interval=%s", run_dir, pid, interval)
 
     try:
-        written = run_sampler(run_dir, root_pid=pid, interval=args.interval, max_duration_s=args.max_duration)
+        written = run_sampler(run_dir, root_pid=pid, interval=interval, max_duration_s=args.max_duration)
     except Exception:
-        log_failure(log, "sampler aborted", run_dir=str(run_dir), pid=pid, interval=args.interval)
+        log_failure(log, "sampler aborted", run_dir=str(run_dir), pid=pid, interval=interval)
         return 1
 
     log.info("sampling finished | samples=%s", written)
@@ -156,6 +162,8 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
 
 
 def cmd_hook(_args: argparse.Namespace) -> int:
+    from features.wrapper import hook as hook_module
+
     return hook_module.main()
 
 
