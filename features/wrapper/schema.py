@@ -22,6 +22,10 @@ SAMPLES_FILENAME = "samples.jsonl"
 TOOLCALLS_FILENAME = "toolcalls.jsonl"
 RUN_LOG_FILENAME = "cordon.log"
 
+# Lives here rather than in sampler.py so that the control layer and the CLI parser can read it
+# without importing psutil. sampler.py re-exports it, so sampler.DEFAULT_INTERVAL_S still resolves.
+DEFAULT_INTERVAL_S = 0.25
+
 
 @dataclass
 class Sample:
