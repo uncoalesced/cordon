@@ -266,3 +266,40 @@ File-level granularity: every commit gets a line naming the file it touched and 
   an Android kernel still being reported as Linux, denied-versus-missing for both the cgroup mount
   and BTF, the capability bits including the empty-bounding-set case, environment naming for
   Termux and proot, and the tier table extended with the capability requirement.
+
+### Stage 2 host audit — the two remaining devices
+
+- `docs/stage2-host-audit.md` — the Step 0 audit of the two devices offered as the Stage 2 host,
+  with raw command output rather than a summary. Device 1 turns out to be HC8 itself: same SSH
+  endpoint, same uid and SELinux context, same 4.14 kernel build string, and Tailscale names it
+  `headless-chicken-8-pro` and types it android. Re-audited anyway rather than assumed, and the
+  probe table comes back identical line for line — still NO-GO, exit 1. Device 2 (`joel-folding`,
+  a genuine Linux node per Tailscale) could not be audited at all: SSH refused the available key
+  over the tailnet IP, over MagicDNS, and from device 1 as a jump host, and the MagicDNS attempt
+  returning `publickey,password` proves Tailscale SSH is not enabled server-side. It is recorded
+  as unaudited rather than stretched into a verdict, with the one `authorized_keys` line that
+  unblocks it. Also dates CLAUDE.md §15 Q8: the `memcg_bpf_ops` series is still RFC v3 against
+  bpf-next as of 2026-01-23 and the surrounding LWN coverage of 2026-05-15 still describes the
+  area as early stage, so Stage 2b stays blocked on a self-built kernel and §13's definition of
+  done for it is untouched.
+- `features/wrapper/schema.py` — `DEFAULT_INTERVAL_S` moved here from `sampler.py`. It is a plain
+  constant that the control layer and the CLI parser both need, and reading it from `sampler.py`
+  dragged psutil into every importer. `sampler.py` re-exports it, so `sampler.DEFAULT_INTERVAL_S`
+  and `hook.DEFAULT_INTERVAL_S` still resolve unchanged.
+- `features/control/intent.py` — `import psutil` moved inside `total_memory_bytes()`, the one
+  function that uses it. The existing `except Exception` already covered the failure, so a host
+  without psutil now falls back to the documented 16GB tier-scaling assumption and logs it rather
+  than failing at import.
+- `features/control/guard.py` — takes `DEFAULT_INTERVAL_S` from `schema` instead of `sampler`,
+  cutting the first of the two chains that reached psutil from the CLI.
+- `features/wrapper/sampler.py` — re-exports `DEFAULT_INTERVAL_S` from `schema` rather than
+  defining it. Nothing in the sampling loop changed, so Stage 1's measured overhead is unaffected.
+- `features/wrapper/cli.py` — imports `sampler` and `hook` inside the two commands that need them.
+  Together with the above this makes `cordon control probe` runnable through its own entry point on
+  a host without psutil, which is the whole point of a probe: on device 1 it previously died with
+  `ModuleNotFoundError: No module named 'psutil'` and printed no table. The HC8 pass fixed this
+  same coupling in `tests/conftest.py` and left the sibling caller in `cli.py` untouched, so this
+  finishes that fix at the pattern rather than at one symptom.
+- `tests/test_cli.py` — runs `control probe` in a subprocess with psutil blocked at import and
+  asserts a real table comes back. Verified to fail against the previous arrangement, so the
+  regression is pinned rather than assumed.
