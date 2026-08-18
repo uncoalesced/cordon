@@ -1,4 +1,15 @@
-# Cordon
+<p align="center">
+  <img src="assets/banner.svg" alt="Cordon — tool-call-granularity resource control for AI coding agents" width="720">
+</p>
+
+<p align="center">
+  <a href="https://github.com/uncoalesced/cordon/actions/workflows/ci.yml"><img src="https://github.com/uncoalesced/cordon/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5c400?style=flat-square&labelColor=0d0d10" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-f5c400?style=flat-square&labelColor=0d0d10" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/stage%201-measuring-f5c400?style=flat-square&labelColor=0d0d10" alt="Stage 1: measuring">
+  <img src="https://img.shields.io/badge/stage%202-partial-9a5b00?style=flat-square&labelColor=0d0d10" alt="Stage 2: partial">
+  <a href="docs/stage1-design.md"><img src="https://img.shields.io/badge/grounded%20in-AgentCgroup%20%2F%20AgentSight-0d0d10?style=flat-square&labelColor=f5c400" alt="Grounded in AgentCgroup / AgentSight"></a>
+</p>
 
 Cordon watches what an AI coding agent does at the level of individual tool calls, not the
 container as a whole. To most resource controllers, a `pytest` run and a `git status` are both
@@ -123,6 +134,7 @@ Measure what the enforcement is worth under CPU contention:
 ## Layout
 
 ```
+assets/              logo, banner, social preview — see docs/design-language.md
 features/wrapper/   sampler, hook entrypoint, reducer, JSON-lines schema
 features/analysis/  characterization passes over reduced tool-call records
 features/control/   capability probe, intent protocol, cgroup backends, guarded runner
@@ -142,6 +154,8 @@ tests/                pytest suite
   what, why the hint protocol uses tiers rather than absolute byte counts, what throttle
   threshold triggers feedback to the agent and why that number, and what was deliberately not
   built while the kernel side is gated.
+- `docs/design-language.md` records the visual identity — palette, type, badge markup, and the
+  GitHub topics/description to set for discoverability.
 
 ## License
 
