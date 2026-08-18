@@ -303,3 +303,48 @@ File-level granularity: every commit gets a line naming the file it touched and 
 - `tests/test_cli.py` — runs `control probe` in a subprocess with psutil blocked at import and
   asserts a real table comes back. Verified to fail against the previous arrangement, so the
   regression is pinned rather than assumed.
+
+### Visual identity
+
+- `assets/banner.svg` — README header, 1200×320. Cordon tape — black ground, hazard-amber
+  diagonal stripes — rather than the generic tech gradient, because the project's job literally is
+  drawing a boundary around a subprocess and deciding what may cross it. The name picked the
+  palette, not the other way round. Both hazard bands are one 28px `<pattern>` rotated 45°, so
+  there is no per-stripe markup to maintain and no raster to keep in sync. The canvas is 320 rather
+  than a rounder 300 because the bracket glyphs flanking the wordmark descend to y=169 against a
+  tagline baseline at y=225; at 300 the two collided. The wordmark sits at `x="609"`, not 600:
+  browsers add `letter-spacing` after the final glyph as well, and `text-anchor="middle"` centres
+  on that full advance, so a word tracked at 18 and centred at 600 renders 9px left of true centre
+  — which had driven the `[` 1.5px into the `C`. Brackets moved out to 320/880 for 17.5px of even
+  clearance on both sides, verified against the real Arial metrics rather than by eye, and checked
+  to hold whether or not a renderer counts the trailing tracking. Type is system stacks only
+  (Arial, Consolas), so nothing depends on a webfont surviving GitHub's SVG sanitizer.
+- `assets/mark.svg` — 200×200 square mark: an amber `C` on black ground with a hazard band across
+  the lower third. Source for the repo avatar and any favicon; a PNG gets exported per surface
+  rather than committing one raster per size. The band stops at y=176 instead of running to the
+  bottom edge so the 28px rounded corners still read as corners at avatar sizes, and the glyph
+  clears it by 26px. Same two-colour rule and same system font stack as the banner.
+- `assets/social-preview.png` — 1280×640, the dimensions GitHub requires. Its own composition
+  rather than a crop of the banner: the mark stacked over an unbracketed wordmark with the repo URL
+  beneath, and the mark inverted to amber-ground so it still reads as a thumbnail in a feed, where
+  the banner's 19px tagline would not. Committed as a PNG because GitHub's social-preview upload
+  does not accept SVG. It cannot be applied from a commit — the upload is manual, and
+  `docs/design-language.md` says where.
+- `docs/design-language.md` — palette, type rules, badge markup and repo metadata, written down so
+  the identity survives having to be re-derived later. Records why the palette is two colours plus
+  one dim state: black and amber carry everything, and `cordon-amber-dim` exists only to mark
+  something not-yet-complete — Stage 2's kernel-side layer, currently — without spending a third
+  hue on it, the same way the codebase stays sync-only on purpose. Badges are pinned to
+  `style=flat-square` because the rounded default and `for-the-badge` both read as a consumer
+  product, which this isn't. Corrected against the assets as actually committed: the banner is
+  1200×320 rather than 300, and there is no `social-preview.svg` to regenerate the preview from, so
+  the instruction is to rebuild the composition at size rather than to re-export a source that does
+  not exist. Also carries the two steps that cannot be done from a commit at all — the
+  social-preview upload and the topics/description — so they do not get lost.
+- `README.md` — banner and a seven-badge row above the existing prose. The badges are raw
+  `<a>`/`<img>` HTML rather than the Markdown recorded in `docs/design-language.md`, because they
+  sit inside a `<p align="center">` and Markdown image syntax cannot be centred on GitHub; all
+  seven URLs are identical between the two files, and they are meant to be kept in sync by URL
+  rather than by pasting the Markdown block over, which would silently drop the centring. The
+  banner is displayed at `width="720"` against a 1200-wide source so it stays sharp on HiDPI.
+  Committed last of the five, so every asset path it references already exists.
