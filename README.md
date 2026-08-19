@@ -2,6 +2,7 @@
   <img src="assets/banner.svg" alt="Cordon — tool-call-granularity resource control for AI coding agents" width="720">
 </p>
 
+
 <p align="center">
   <a href="https://github.com/uncoalesced/cordon/actions/workflows/ci.yml"><img src="https://github.com/uncoalesced/cordon/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5c400?style=flat-square&labelColor=0d0d10" alt="License: MIT"></a>
@@ -10,6 +11,7 @@
   <img src="https://img.shields.io/badge/enforcement-cgroup%20v2-9a5b00?style=flat-square&labelColor=0d0d10" alt="Enforcement: cgroup v2, kernel policy layer pending">
   <a href="docs/stage1-design.md"><img src="https://img.shields.io/badge/grounded%20in-AgentCgroup%20%2F%20AgentSight-0d0d10?style=flat-square&labelColor=f5c400" alt="Grounded in AgentCgroup / AgentSight"></a>
 </p>
+
 
 Cordon watches what an AI coding agent does at the level of individual tool calls, not the
 container as a whole. To most resource controllers, a `pytest` run and a `git status` both look
