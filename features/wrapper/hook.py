@@ -33,10 +33,13 @@ ENV_DISABLE = "CORDON_DISABLE"
 
 SAMPLER_PID_FILENAME = "sampler.pid"
 
-_START_EVENTS = {"SessionStart"}
-_END_EVENTS = {"SessionEnd", "Stop"}
-_PRE_EVENTS = {"PreToolUse"}
-_POST_EVENTS = {"PostToolUse"}
+# Claude Code, Codex, Hermes, Cursor, and Gemini CLI all fire the same four lifecycle moments
+# through a hook; each just spells the event name differently. See features/wrapper/agents.py
+# for the config-side half of this (where each agent's hook file lives, what shape it wants).
+_START_EVENTS = {"SessionStart", "on_session_start", "sessionStart"}
+_END_EVENTS = {"SessionEnd", "Stop", "on_session_end", "sessionEnd", "stop"}
+_PRE_EVENTS = {"PreToolUse", "pre_tool_call", "preToolUse", "BeforeTool"}
+_POST_EVENTS = {"PostToolUse", "post_tool_call", "postToolUse", "postToolUseFailure", "AfterTool"}
 
 _UNKNOWN_SESSION = "unknown-session"
 
@@ -138,7 +141,9 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
     run_root = default_run_root() if run_root is None else Path(run_root)
 
     event_name = str(payload.get("hook_event_name", ""))
-    session_id = str(payload.get("session_id") or _UNKNOWN_SESSION)
+    # Cursor's tool hooks key session identity as "conversation_id" instead of "session_id"
+    # (its own sessionStart/sessionEnd events use "session_id", so both are checked here).
+    session_id = str(payload.get("session_id") or payload.get("conversation_id") or _UNKNOWN_SESSION)
     run_dir = run_root / session_id
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +154,9 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
 
     tool_name = str(payload.get("tool_name", ""))
     tool_input = payload.get("tool_input", {})
-    tool_use_id = str(payload.get("tool_use_id", "") or "")
+    # Hermes nests the tool-call id in "extra" instead of sending it top-level.
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    tool_use_id = str(payload.get("tool_use_id") or extra.get("tool_call_id") or "")
     agent_pid = resolve_agent_root()
 
     if event_name in _START_EVENTS:
@@ -182,7 +189,7 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
             tool_type=tool_name,
             command=summarize_command(tool_name, tool_input),
             cwd=str(payload.get("cwd", "")),
-            exit_status=_exit_status(payload.get("tool_response")),
+            exit_status=_exit_status(_response_source(payload, extra)),
             agent_pid=agent_pid,
         )
     elif event_name in _END_EVENTS:
@@ -204,15 +211,36 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
     return marker
 
 
-def _exit_status(tool_response: Any) -> str:
-    if isinstance(tool_response, dict):
+def _response_source(payload: dict[str, Any], extra: dict[str, Any]) -> Any:
+    # Where the post-call result lives differs per agent: Claude Code/Codex/Gemini send a
+    # "tool_response" object; Cursor sends "tool_output" as a JSON *string*, or (on failure)
+    # skips both in favour of top-level "error_message"/"failure_type"; Hermes reports outcome
+    # inside "extra" (status/error_type/duration_ms) rather than as its own top-level field.
+    if "tool_response" in payload:
+        return payload.get("tool_response")
+    if "tool_output" in payload:
+        return payload.get("tool_output")
+    if "failure_type" in payload or "error_message" in payload:
+        return {"status": "error", "error_type": payload.get("failure_type"), "error_message": payload.get("error_message")}
+    if "status" in extra or "error_type" in extra:
+        return extra
+    return None
+
+
+def _exit_status(response: Any) -> str:
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except ValueError:
+            return "ok" if response else ""
+    if isinstance(response, dict):
         for key in ("exit_code", "exitCode", "status", "success"):
-            if key in tool_response:
-                return str(tool_response[key])
-        if tool_response.get("is_error") or tool_response.get("isError"):
+            if key in response:
+                return str(response[key])
+        if response.get("is_error") or response.get("isError") or response.get("error") or response.get("error_type"):
             return "error"
         return "ok"
-    if tool_response is None:
+    if response is None:
         return ""
     return "ok"
 
