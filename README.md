@@ -56,27 +56,22 @@ break the agent it's measuring.
 
 ## Stage 2: control
 
-Every guarded tool call gets its own ephemeral cgroup, named `tool_<pid>_<timestamp>`, created
-before the subprocess spawns and torn down after it exits. The child joins the cgroup itself,
-before `exec`, so allocations aren't missed in the gap between fork and the parent noticing.
+Stage 1 measures; Stage 2 acts on what it finds — same tool-call granularity, now enforced
+instead of just logged. Every guarded call gets its own ephemeral cgroup
+(`tool_<pid>_<timestamp>`), created before the subprocess spawns and destroyed after it exits.
 
-The limits come from what the agent said it was about to do. Before a tool call it can set
-`AGENT_RESOURCE_HINT=memory:high`, and that tier resolves to a `memory.high` soft limit and a
-`cpu.weight` for that one call. Crossing `memory.high` throttles; it doesn't kill. Hints are
-advisory — the agent can be wrong, and nothing here trusts one beyond setting a soft limit.
-
-Feedback goes the other way too. If a call stalls past a threshold, or gets frozen, or gets
-OOM-killed, Cordon appends a plain-English note to that call's stderr naming the peak, the limit,
-and how long it stalled. The agent reads its own tool output on the next turn, so it sees that
-note as part of the result and can narrow its scope or declare a higher tier, rather than just
-failing and retrying the same thing.
-
-What isn't built is the in-kernel policy layer. `sched_ext` (CPU) needs Linux 6.12+, and
-`memcg_bpf_ops` (memory) is still an unmerged RFC patch series. Both let throttling decisions
-happen in-kernel in microseconds instead of in a userspace daemon at tens of milliseconds, which
-matters against bursts that last a second or two. Neither is stubbed or simulated — `cordon
-control probe` reports what the machine actually has, and the code runs at whatever tier that
-allows. `docs/stage2-design.md` covers what unblocks what.
+- **Limits come from the agent's own declared intent.** `AGENT_RESOURCE_HINT=memory:high` before
+  a call resolves to a `memory.high` soft limit and a `cpu.weight` for that call only. Hints are
+  advisory, not trusted blindly — crossing the limit throttles, it doesn't kill.
+- **Feedback runs the other way too.** A stalled, frozen, or OOM-killed call gets a plain-English
+  note appended to its stderr — peak, limit, how long it stalled — so the agent sees it on the
+  next turn and can narrow its scope instead of retrying blind.
+- **The in-kernel policy layer isn't built yet.** `sched_ext` (CPU) needs Linux 6.12+;
+  `memcg_bpf_ops` (memory) is still an unmerged RFC. Both matter because they'd move throttling
+  decisions from a userspace daemon (tens of milliseconds) to in-kernel (microseconds) — the
+  difference that counts against bursts lasting a second or two. `cordon control probe` reports
+  what your machine actually has rather than stubbing or simulating the gap; `docs/stage2-design.md`
+  covers what unblocks what.
 
 ## Install
 
