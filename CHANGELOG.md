@@ -136,3 +136,133 @@ File-level granularity: every commit gets a line naming the file it touched and 
   branches force-pushed. `README.md`'s references to it were removed.
 - `.gitignore` — ignore `CLAUDE.md` so it can't be re-added by accident, and the `.git-broken*`
   / `.git-oldswap*` salvage copies left behind by earlier repo repair attempts.
+
+## Unreleased — Stage 2
+
+### Control
+
+- `docs/stage2-design.md` — the gating record and the two protocol decisions CLAUDE.md §15 left
+  open. Names which kernel features are present on the development machine and which are not
+  (`sched_ext` needs 6.12+, the reachable WSL2 kernel is 6.6.114.1; `memcg_bpf_ops` is RFC v3
+  against bpf-next and unmerged), and separates the mechanism from the policy: `memory.high`,
+  `cpu.weight`, freeze, kill and PSI stall accounting are plain cgroup v2 and need no patch,
+  while only the microsecond in-kernel *decision* is blocked. Answers Q10 (tiers are the
+  protocol, absolute values an escape hatch, with the tier table as a fraction of installed RAM)
+  and Q11 (feedback fires above `max(200ms, 5% of wall time)` of stall, always on freeze or OOM),
+  each with the §6 measurement the number comes from. Also records what was deliberately *not*
+  built: no userspace freeze-escalation loop, because that loop is `oomd` and §4 is the argument
+  that it is too slow.
+- `features/control/__init__.py` — package marker. One control package rather than
+  `stage2_cpu` / `stage2_mem`, because both halves share the cgroup lifecycle, the intent
+  protocol, the feedback channel and the probe; splitting would put one module in each and
+  duplicate four.
+- `features/control/probe.py` — kernel capability detection, and the honesty layer for the whole
+  stage. Checks cgroup v2 controllers, whether children can actually be created, PSI,
+  `/sys/kernel/sched_ext/` (distinguishing "kernel too old" from "new enough but absent", since
+  those have different fixes) and `memcg_bpf_ops` by looking for the struct_ops in BTF. Collapses
+  the result into an enforcement tier of `none` / `cgroup2` / `bpf` so no other module has to
+  guess what it is allowed to do. Every probe is individually wrapped: a raising check reports
+  unavailable rather than taking the report down.
+- `features/control/intent.py` — the bidirectional protocol from CLAUDE.md §5.4, both directions.
+  Upward, `AGENT_RESOURCE_HINT` parses forgivingly because the emitter is a language model:
+  `memory:`/`mem:`/`ram:`, a bare tier, mixed separators, and combined dimensions all work, and
+  an unrecognised token is logged and skipped rather than failing a tool call. Tiers resolve to
+  bytes as a fraction of installed RAM, so the same hint means the same intent on a 16GB laptop
+  and a 128GB workstation, with `low` landing on 410MB at 16GB to match the paper's own LOW arm.
+  Downward, `FeedbackPolicy` decides when a throttle is worth telling the agent about and renders
+  the message. Repeat warnings for the same command escalate rather than suppress, because
+  suppression hides information exactly during the retry loops §6 found in 85–97% of tasks.
+- `features/control/cgroup.py` — the ephemeral per-call cgroup lifecycle behind two backends.
+  `Cgroup2Backend` is complete real code against the real interface, not a stub: it delegates
+  `+cpu +memory` down the tree, creates `tool_<pid>_<ts>/` per call, writes `memory.high`,
+  `cpu.weight` and `memory.oom.group`, reads peak from `memory.peak` with a running-max fallback
+  for pre-5.19 kernels, takes stall time from `memory.pressure`'s cumulative `full total=` (which
+  needs no baseline subtraction because each call's cgroup is fresh), and on teardown fires
+  `cgroup.kill` before `rmdir` so a grandchild that outlived its parent cannot leak the cgroup.
+  Every file and semantic it depends on was verified by hand against a live cgroup v2 mount
+  before the code was written. `NullBackend` records what would have been applied and enforces
+  nothing, which is what runs where there is no cgroup v2. `memory.max` is deliberately never
+  set — a hard limit invokes the OOM killer, and §4's termination-cost argument says a tool call
+  is the wrong thing to kill.
+- `features/control/guard.py` — one guarded tool call end to end: resolve intent, create and
+  limit the cgroup, spawn with the child joining `cgroup.procs` in `preexec_fn` *before* `exec`
+  (moving the PID from the parent after spawn would miss allocations in the gap, which against a
+  3GB/s burst is the part worth catching), poll stats while it runs, then decide feedback and
+  append it to the call's stderr. Child stderr goes to a temp file rather than a pipe, because
+  the message has to be appended after exit and a pipe would deadlock on a command that outwrites
+  the buffer while the parent is polling. Feedback is suppressed when the process never actually
+  joined its cgroup: telling an agent it was throttled when nothing was enforcing is worse than
+  silence. Every failure path degrades to unguarded-but-running — a resource controller that can
+  stop a tool call from executing at all is worse than the problem it exists to solve.
+- `features/control/contention.py` — the synthetic before/after harness for Stage 2a's definition
+  of done. Runs identical fixed-work CPU load unguarded and then guarded, and reports per-tier
+  mean/p95/max plus survival, with HIGH-tier p95 as the headline, mirroring §6's experiment
+  shape. Workers time themselves and report on stdout so the number is not quantized by the
+  parent's poll interval, and they self-join their cgroup through an environment variable rather
+  than `preexec_fn`, since this harness has all workers in flight at once and `fork` with Python
+  in the child is not a hazard worth taking for a benchmark. On a null backend both arms are the
+  same experiment run twice, so the report says that outright instead of printing noise as if it
+  were a result.
+- `features/wrapper/cli.py` — added `cordon control probe|run|contend`. `probe` exits non-zero
+  when nothing can be enforced, so it works as a gate in a script; `run` passes the guarded
+  command's exit code straight through, so it is transparent to whatever invoked it.
+- `pyproject.toml` — added `features.control` to the packaged modules.
+- `README.md` — replaced the "Stage 2 hasn't been built" section with what is built and what
+  is still gated, and documented the three `control` verbs.
+- `tests/test_control_probe.py` — every capability check against synthetic filesystem shapes,
+  including the too-old-kernel versus interface-absent distinction, the enforcement tier table,
+  and that a raising probe degrades instead of propagating.
+- `tests/test_control_intent.py` — hint spellings, combined dimensions, absolute sizes, tier
+  scaling and monotonicity, the floor on small machines, and the full Q11 threshold: quiet below
+  the floor, firing above it, the fractional term protecting long calls, freeze and OOM always
+  reporting, escalation on repeats, and silence when the backend cannot observe.
+- `tests/test_control_cgroup.py` — the real backend driven against a synthetic cgroup tree:
+  controller delegation, limit writes, self-join, stat parsing across peak, pressure and events,
+  the pre-5.19 peak fallback, freeze/thaw, and that teardown kills survivors before giving up.
+  Missing stat files degrade to zero rather than raising, since a cgroup interface that varies by
+  kernel version is the normal case, not an error.
+- `tests/test_control_guard.py` — one cgroup per call and always torn down, hints flowing up into
+  limits, feedback landing on stderr alongside the child's own output, no feedback when nothing
+  was throttled or when the process never attached, exit codes passing through, timeouts, and
+  that a backend raising on setup or on every stat read still lets the command run.
+- `tests/test_control_contention.py` — both arms running, one cgroup per guarded worker, the
+  baseline arm never touching the backend, a failing backend still running its worker, and that
+  the report refuses to claim a result on a null backend.
+- `tests/test_cli.py` — added coverage for the three `control` verbs, including exit-code
+  passthrough, the recorded call log, and clean aborts when the guard or the experiment raises.
+
+### HC8 feasibility audit
+
+- `docs/stage2-hc8-audit.md` — the Step 0 audit of HC8, the phone-hosted host proposed for
+  Stage 2's kernel work, with the raw command output rather than a summary. Verdict is NO-GO on
+  all seven checks. Establishes what HC8 actually is: not proot-distro, not a chroot and not an
+  Android VM, but Termux running natively as an unprivileged Android app under the
+  `untrusted_app_27` SELinux domain, using Termux's Debian package format — which is why it looks
+  like Debian from inside. Kernel is 4.14.356 against sched_ext's 6.12 floor, every capability set
+  including the bounding set is zero, `/sys/fs/cgroup/` cannot even be listed, there is no kernel
+  BTF, and the device is unrooted. Also records that `psutil` refuses to build on Android at all,
+  so Stage 1 measurement cannot run there either. Names the five things that would have to change
+  and why steps 2 and 3 of that list are a device port rather than a configuration.
+- `features/control/probe.py` — fixed four ways the probe misreported reality, each found by
+  running it on HC8 rather than reasoning about it. `kernel_release()` read
+  `platform.uname().release`, which on Android CPython returns the Android release (`16`) instead
+  of the kernel — a probe that reports 16 against a 6.12 threshold can talk itself into a GO on a
+  4.14 kernel, so it now reads the `os.uname()` syscall, as does the new `kernel_sysname()`
+  (`platform.system()` is `Android` there, which would have reported a Linux kernel as not Linux).
+  `EACCES`/`EPERM` are now distinguished from `ENOENT` for the cgroup mount and for kernel BTF,
+  because "not mounted" and "you will never be allowed to touch it" have completely different
+  fixes. Added `probe_capabilities`, which reads the real bits from `/proc/self/status` and calls
+  out an empty bounding set as permanent rather than merely unsatisfied — HC8's single most
+  decisive signal, and the probe had been blind to it. Added environment identification so the
+  platform line names Android, Termux and proot instead of reporting a bare kernel version.
+- `features/control/probe.py` — the `bpf` enforcement tier now additionally requires the
+  capability check to pass. `sched_ext` and `memcg_bpf_ops` being present is not enough if the
+  process can never hold `CAP_BPF`.
+- `tests/conftest.py` — made the `psutil` import lazy, inside the one fixture that uses it.
+  It was at module scope, so on a host where psutil cannot be installed the entire suite failed
+  to collect, including the capability-probe tests that have no need of it. Those tests now run
+  on the target host, which is the only place their answers can be verified.
+- `tests/test_control_probe.py` — coverage for all of the above: the Android kernel-release trap,
+  an Android kernel still being reported as Linux, denied-versus-missing for both the cgroup mount
+  and BTF, the capability bits including the empty-bounding-set case, environment naming for
+  Termux and proot, and the tier table extended with the capability requirement.

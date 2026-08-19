@@ -7,7 +7,6 @@ import sys
 import time
 from pathlib import Path
 
-import psutil
 import pytest
 
 from features.analysis.dataset import Run
@@ -84,6 +83,10 @@ def make_run():
 
 @pytest.fixture
 def busy_child():
+    # Imported here, not at module scope: psutil does not build on Android, and the
+    # capability-probe tests must still collect on a host that cannot install it.
+    import psutil
+
     procs: list[subprocess.Popen] = []
 
     def spawn(duration: float = 5.0) -> subprocess.Popen:

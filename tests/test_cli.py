@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from features.wrapper.cli import HOOK_EVENTS, _merge_hooks, build_parser, hook_settings, main
@@ -110,6 +111,60 @@ def test_analyze_aborts_cleanly_when_loading_explodes(tmp_path: Path, monkeypatc
         lambda _root: (_ for _ in ()).throw(RuntimeError("disk on fire")),
     )
     assert main(["analyze", "--runs", str(tmp_path)]) == 1
+
+
+def test_control_probe_reports_this_machine(capsys):
+    exit_code = main(["control", "probe"])
+    out = capsys.readouterr().out
+    assert "enforcement tier:" in out
+    assert exit_code in (0, 1)
+
+
+def test_control_probe_emits_json(capsys):
+    main(["control", "probe", "--json"])
+    names = {cap["name"] for cap in json.loads(capsys.readouterr().out)}
+    assert "sched_ext" in names
+
+
+def test_control_run_passes_the_exit_code_through():
+    assert main(["control", "run", "--", sys.executable, "-c", "raise SystemExit(4)"]) == 4
+
+
+def test_control_run_needs_a_command():
+    assert main(["control", "run"]) == 2
+
+
+def test_control_run_records_the_call(tmp_path: Path, capsys):
+    record = tmp_path / "control.jsonl"
+    argv = ["control", "run", "--hint", "memory:high", "--record", str(record), "--json", "--", sys.executable, "-c", "pass"]
+    assert main(argv) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["intent"]["memory_tier"] == "high"
+    assert payload["cgroup_name"].startswith("tool_")
+    assert record.exists()
+
+
+def test_control_run_aborts_cleanly_when_the_guard_explodes(monkeypatch):
+    monkeypatch.setattr(
+        "features.wrapper.cli.run_guarded",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("cgroupfs on fire")),
+    )
+    assert main(["control", "run", "--", "true"]) == 1
+
+
+def test_control_contend_writes_a_report(tmp_path: Path):
+    out = tmp_path / "contention.md"
+    assert main(["control", "contend", "--high", "1", "--low", "1", "--work", "20000", "--out", str(out)]) == 0
+    assert "Synthetic CPU contention" in out.read_text(encoding="utf-8")
+
+
+def test_control_contend_aborts_cleanly(monkeypatch):
+    monkeypatch.setattr(
+        "features.wrapper.cli.contention.run_contention",
+        lambda **_k: (_ for _ in ()).throw(RuntimeError("no cores")),
+    )
+    assert main(["control", "contend"]) == 1
 
 
 def test_parser_requires_a_subcommand(capsys):
