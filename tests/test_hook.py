@@ -108,10 +108,62 @@ def test_missing_session_id_still_records(tmp_path: Path):
         ({"stdout": "hi"}, "ok"),
         (None, ""),
         ("plain", "ok"),
+        ('{"exitCode": 0}', "0"),  # Cursor's tool_output arrives as a JSON string
+        ({"llmContent": "x", "error": {"message": "boom"}}, "error"),  # Gemini AfterTool
     ],
 )
 def test_exit_status_extraction(response, expected):
     assert hook_module._exit_status(response) == expected
+
+
+@pytest.mark.parametrize(
+    "event,expected_marker_event",
+    [
+        ("SessionStart", EVENT_SESSION_START),
+        ("on_session_start", EVENT_SESSION_START),
+        ("sessionStart", EVENT_SESSION_START),
+        ("PreToolUse", EVENT_TOOL_START),
+        ("pre_tool_call", EVENT_TOOL_START),
+        ("preToolUse", EVENT_TOOL_START),
+        ("BeforeTool", EVENT_TOOL_START),
+        ("PostToolUse", EVENT_TOOL_END),
+        ("post_tool_call", EVENT_TOOL_END),
+        ("postToolUse", EVENT_TOOL_END),
+        ("postToolUseFailure", EVENT_TOOL_END),
+        ("AfterTool", EVENT_TOOL_END),
+        ("SessionEnd", EVENT_SESSION_END),
+        ("Stop", EVENT_SESSION_END),
+        ("on_session_end", EVENT_SESSION_END),
+        ("sessionEnd", EVENT_SESSION_END),
+        ("stop", EVENT_SESSION_END),
+    ],
+)
+def test_every_agents_event_names_map_to_the_right_marker(tmp_path: Path, event, expected_marker_event):
+    marker = hook_module.handle(
+        _payload(event, tool_name="Bash", tool_input={"command": "x"}), run_root=tmp_path
+    )
+    assert marker.event == expected_marker_event
+
+
+def test_session_id_falls_back_to_cursors_conversation_id(tmp_path: Path):
+    marker = hook_module.handle(
+        {"hook_event_name": "preToolUse", "conversation_id": "conv-1", "tool_name": "Shell", "tool_input": {}},
+        run_root=tmp_path,
+    )
+    assert marker.session_id == "conv-1"
+
+
+def test_tool_use_id_falls_back_to_hermes_extra_tool_call_id(tmp_path: Path):
+    marker = hook_module.handle(
+        _payload(
+            "pre_tool_call",
+            tool_name="terminal",
+            tool_input={"command": "ls"},
+            extra={"tool_call_id": "hermes-42"},
+        ),
+        run_root=tmp_path,
+    )
+    assert marker.call_key == "hermes-42"
 
 
 def test_main_never_fails_the_agent_on_bad_stdin(monkeypatch):
