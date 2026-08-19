@@ -266,3 +266,139 @@ File-level granularity: every commit gets a line naming the file it touched and 
   an Android kernel still being reported as Linux, denied-versus-missing for both the cgroup mount
   and BTF, the capability bits including the empty-bounding-set case, environment naming for
   Termux and proot, and the tier table extended with the capability requirement.
+
+### Stage 2 host audit — the two remaining devices
+
+- `docs/stage2-host-audit.md` — the Step 0 audit of the two devices offered as the Stage 2 host,
+  with raw command output rather than a summary. Device 1 turns out to be HC8 itself: same SSH
+  endpoint, same uid and SELinux context, same 4.14 kernel build string, and Tailscale names it
+  `headless-chicken-8-pro` and types it android. Re-audited anyway rather than assumed, and the
+  probe table comes back identical line for line — still NO-GO, exit 1. Device 2 (`joel-folding`,
+  a genuine Linux node per Tailscale) could not be audited at all: SSH refused the available key
+  over the tailnet IP, over MagicDNS, and from device 1 as a jump host, and the MagicDNS attempt
+  returning `publickey,password` proves Tailscale SSH is not enabled server-side. It is recorded
+  as unaudited rather than stretched into a verdict, with the one `authorized_keys` line that
+  unblocks it. Also dates CLAUDE.md §15 Q8: the `memcg_bpf_ops` series is still RFC v3 against
+  bpf-next as of 2026-01-23 and the surrounding LWN coverage of 2026-05-15 still describes the
+  area as early stage, so Stage 2b stays blocked on a self-built kernel and §13's definition of
+  done for it is untouched.
+- `features/wrapper/schema.py` — `DEFAULT_INTERVAL_S` moved here from `sampler.py`. It is a plain
+  constant that the control layer and the CLI parser both need, and reading it from `sampler.py`
+  dragged psutil into every importer. `sampler.py` re-exports it, so `sampler.DEFAULT_INTERVAL_S`
+  and `hook.DEFAULT_INTERVAL_S` still resolve unchanged.
+- `features/control/intent.py` — `import psutil` moved inside `total_memory_bytes()`, the one
+  function that uses it. The existing `except Exception` already covered the failure, so a host
+  without psutil now falls back to the documented 16GB tier-scaling assumption and logs it rather
+  than failing at import.
+- `features/control/guard.py` — takes `DEFAULT_INTERVAL_S` from `schema` instead of `sampler`,
+  cutting the first of the two chains that reached psutil from the CLI.
+- `features/wrapper/sampler.py` — re-exports `DEFAULT_INTERVAL_S` from `schema` rather than
+  defining it. Nothing in the sampling loop changed, so Stage 1's measured overhead is unaffected.
+- `features/wrapper/cli.py` — imports `sampler` and `hook` inside the two commands that need them.
+  Together with the above this makes `cordon control probe` runnable through its own entry point on
+  a host without psutil, which is the whole point of a probe: on device 1 it previously died with
+  `ModuleNotFoundError: No module named 'psutil'` and printed no table. The HC8 pass fixed this
+  same coupling in `tests/conftest.py` and left the sibling caller in `cli.py` untouched, so this
+  finishes that fix at the pattern rather than at one symptom.
+- `tests/test_cli.py` — runs `control probe` in a subprocess with psutil blocked at import and
+  asserts a real table comes back. Verified to fail against the previous arrangement, so the
+  regression is pinned rather than assumed.
+
+### Visual identity
+
+- `assets/banner.svg` — README header, 1200×320. Cordon tape — black ground, hazard-amber
+  diagonal stripes — rather than the generic tech gradient, because the project's job literally is
+  drawing a boundary around a subprocess and deciding what may cross it. The name picked the
+  palette, not the other way round. Both hazard bands are one 28px `<pattern>` rotated 45°, so
+  there is no per-stripe markup to maintain and no raster to keep in sync. The canvas is 320 rather
+  than a rounder 300 because the bracket glyphs flanking the wordmark descend to y=169 against a
+  tagline baseline at y=225; at 300 the two collided. The wordmark sits at `x="609"`, not 600:
+  browsers add `letter-spacing` after the final glyph as well, and `text-anchor="middle"` centres
+  on that full advance, so a word tracked at 18 and centred at 600 renders 9px left of true centre
+  — which had driven the `[` 1.5px into the `C`. Brackets moved out to 320/880 for 17.5px of even
+  clearance on both sides, verified against the real Arial metrics rather than by eye, and checked
+  to hold whether or not a renderer counts the trailing tracking. Type is system stacks only
+  (Arial, Consolas), so nothing depends on a webfont surviving GitHub's SVG sanitizer.
+- `assets/mark.svg` — 200×200 square mark: an amber `C` on black ground with a hazard band across
+  the lower third. Source for the repo avatar and any favicon; a PNG gets exported per surface
+  rather than committing one raster per size. The band stops at y=176 instead of running to the
+  bottom edge so the 28px rounded corners still read as corners at avatar sizes, and the glyph
+  clears it by 26px. Same two-colour rule and same system font stack as the banner.
+- `assets/social-preview.png` — 1280×640, the dimensions GitHub requires. Its own composition
+  rather than a crop of the banner: the mark stacked over an unbracketed wordmark with the repo URL
+  beneath, and the mark inverted to amber-ground so it still reads as a thumbnail in a feed, where
+  the banner's 19px tagline would not. Committed as a PNG because GitHub's social-preview upload
+  does not accept SVG. It cannot be applied from a commit — the upload is manual, and
+  `docs/design-language.md` says where.
+- `docs/design-language.md` — palette, type rules, badge markup and repo metadata, written down so
+  the identity survives having to be re-derived later. Records why the palette is two colours plus
+  one dim state: black and amber carry everything, and `cordon-amber-dim` exists only to mark
+  something not-yet-complete — Stage 2's kernel-side layer, currently — without spending a third
+  hue on it, the same way the codebase stays sync-only on purpose. Badges are pinned to
+  `style=flat-square` because the rounded default and `for-the-badge` both read as a consumer
+  product, which this isn't. Corrected against the assets as actually committed: the banner is
+  1200×320 rather than 300, and there is no `social-preview.svg` to regenerate the preview from, so
+  the instruction is to rebuild the composition at size rather than to re-export a source that does
+  not exist. Also carries the two steps that cannot be done from a commit at all — the
+  social-preview upload and the topics/description — so they do not get lost.
+- `README.md` — banner and a seven-badge row above the existing prose. The badges are raw
+  `<a>`/`<img>` HTML rather than the Markdown recorded in `docs/design-language.md`, because they
+  sit inside a `<p align="center">` and Markdown image syntax cannot be centred on GitHub; all
+  seven URLs are identical between the two files, and they are meant to be kept in sync by URL
+  rather than by pasting the Markdown block over, which would silently drop the centring. The
+  banner is displayed at `width="720"` against a 1200-wide source so it stays sharp on HiDPI.
+  Committed last of the five, so every asset path it references already exists.
+
+## v1.0.0 — Stage 3: multi-agent
+
+### Multi-agent hook support
+
+- `features/wrapper/agents.py` — per-agent hook config registry. Claude Code, Codex CLI,
+  Hermes Agent, Cursor CLI, and Gemini CLI each shipped their own hook system, and every one of
+  them turned out to be a renamed copy of the same idea: matcher + command groups, JSON on
+  stdin carrying `tool_name`/`tool_input`/`session_id`/`cwd`, exit code 2 to block. Claude Code,
+  Codex, and Gemini CLI share one JSON shape byte-for-byte (only the event names differ, so
+  `NESTED_EVENTS` is a dict of four-tuples over one render function); Cursor's `hooks.json` is
+  flat instead of matcher-grouped, so it gets its own small render/merge pair; Hermes's
+  `~/.hermes/config.yaml` is YAML, global rather than per-repo, and additive-merged rather than
+  overwritten so an existing `hooks_auto_accept` or unrelated hook doesn't get clobbered.
+  `ensure_codex_feature_flag` is a deliberately narrow line-based TOML patch — not a real writer
+  — that only understands a single `codex_hooks` key inside `[features]`; anything more exotic
+  in a real `config.toml` (inline tables, arrays of tables) needs a TOML library instead.
+- `features/wrapper/hook.py` — event-name aliasing generalized from a Claude-Code-only set to
+  one alias set per canonical marker (start/pre/post/end), covering all five agents' spellings.
+  Field extraction grew three fallbacks the single-agent version didn't need: session identity
+  checks `conversation_id` after `session_id` (Cursor's tool hooks use the former, its lifecycle
+  hooks the latter); tool-call identity checks `extra.tool_call_id` after `tool_use_id` (Hermes
+  nests it); and exit-status extraction now handles a JSON-encoded string result (Cursor's
+  `tool_output`), an `extra` dict carrying `status`/`error_type` (Hermes), and an `error` key
+  (Gemini's `AfterTool`) in addition to the original `exit_code`/`is_error` shapes.
+- `features/wrapper/sampler.py` — `AGENT_PROCESS_NAMES` extended with `hermes`, `codex`,
+  `cursor-agent`, `gemini`, and `aider` (plus their `.exe` variants), so `resolve_agent_root`
+  can find the right process tree to sample under each agent, not just Claude Code's `claude`.
+- `features/wrapper/wrap.py` — new `cordon wrap` command for agents with no
+  `PreToolUse`/`PostToolUse`-shaped hook system at all. Aider is the current example: there is
+  no moment between "the agent decides to act" and "the action runs" to intercept, so the only
+  thing left to measure is the whole invocation. `run_wrap` spawns the given command directly,
+  which means it already has the exact child PID to sample — no process-name heuristic needed,
+  unlike the hook-driven path. Produces the same `SessionStart`/`SessionEnd` marker pair `cordon
+  reduce` already handles when a hook-based run happens to have zero paired tool calls, so
+  nothing downstream needed to change to accept it; `cordon analyze`'s per-tool-call passes
+  correctly find nothing to say about a wrap-only run rather than failing on one.
+- `features/wrapper/cli.py` — `install-hooks` gained `--agent` (defaulting to `claude-code`,
+  so the existing single-agent invocation still works unchanged) and dispatches to `agents.py`'s
+  per-shape render/merge functions; Codex additionally gets its `config.toml` feature-flag patch
+  written alongside `hooks.json`. New `wrap` subcommand mirrors `control run`'s argv-after-`--`
+  handling.
+- `pyproject.toml` — added `pyyaml` as a runtime dependency, for the Hermes `config.yaml`
+  merge. Round-tripping arbitrary existing YAML by hand (regex-editing it, the way the Codex
+  TOML flag is handled) was judged too fragile for a file that might already carry a user's own
+  hooks and settings; a real YAML load/dump is the safer failure mode there. Version bumped to
+  1.0.0.
+- `tests/test_agents.py`, `tests/test_hook.py`, `tests/test_cli.py`, `tests/test_sampler.py` —
+  coverage for the registry (per-agent settings paths, merge idempotency, the TOML patch's
+  edge cases), the cross-agent event/field aliasing, `--agent` end-to-end installs for all five
+  agents, and the new process names.
+- `README.md` — restructured `## Use` into a `## Setup` section with one subsection per agent
+  (Claude Code, Codex CLI, Hermes Agent, Cursor CLI, Gemini CLI, Aider), each with its exact
+  install command and the trust/consent step it needs beyond that command where one exists.

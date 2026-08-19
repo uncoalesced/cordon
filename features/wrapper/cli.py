@@ -16,13 +16,17 @@ from features.analysis.report import render_report
 from features.control import contention, probe as probe_module
 from features.control.guard import run_guarded
 from features.control.intent import ENV_HINT as INTENT_ENV
-from features.wrapper import hook as hook_module
+from features.wrapper import agents
 from features.wrapper.logging_setup import configure, get_logger, log_failure
 from features.wrapper.reduce import reduce_run
-from features.wrapper.sampler import DEFAULT_INTERVAL_S, resolve_agent_root, run_sampler
-from features.wrapper.schema import RUN_LOG_FILENAME
+from features.wrapper.schema import DEFAULT_INTERVAL_S, RUN_LOG_FILENAME
 
-HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "SessionEnd")
+# features.wrapper.sampler, .hook, and .wrap import psutil at module scope, and psutil does not
+# build on every host Cordon has to report on. They are imported inside the commands that need
+# them so that `cordon control probe` — the command whose job is to run first on an unknown box
+# — does not require psutil to answer. See docs/stage2-host-audit.md.
+
+HOOK_EVENTS = agents.NESTED_EVENTS[agents.CLAUDE_CODE]
 
 
 def _hook_command() -> str:
@@ -33,42 +37,38 @@ def _hook_command() -> str:
 
 
 def hook_settings() -> dict[str, Any]:
-    entry = {"matcher": "*", "hooks": [{"type": "command", "command": _hook_command()}]}
-    return {"hooks": {event: [dict(entry)] for event in HOOK_EVENTS}}
+    return agents.nested_settings(agents.CLAUDE_CODE, _hook_command())
 
 
 def _merge_hooks(existing: dict[str, Any], additions: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(existing)
-    hooks = dict(merged.get("hooks") or {})
-    for event, entries in additions["hooks"].items():
-        current = list(hooks.get(event) or [])
-        commands = {
-            h.get("command")
-            for group in current
-            if isinstance(group, dict)
-            for h in (group.get("hooks") or [])
-            if isinstance(h, dict)
-        }
-        for entry in entries:
-            if entry["hooks"][0]["command"] not in commands:
-                current.append(entry)
-        hooks[event] = current
-    merged["hooks"] = hooks
-    return merged
+    return agents.merge_nested(existing, additions)
+
+
+def _read_json(path: Path, log: Any) -> dict[str, Any] | None:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log_failure(log, "existing settings unreadable, refusing to overwrite", path=str(path))
+        return None
 
 
 def cmd_sample(args: argparse.Namespace) -> int:
+    from features.wrapper.sampler import resolve_agent_root, run_sampler
+
     run_dir = Path(args.run_dir)
     configure(log_path=run_dir / RUN_LOG_FILENAME, level=logging.DEBUG if args.verbose else logging.INFO)
     log = get_logger("cli")
 
+    interval = DEFAULT_INTERVAL_S if args.interval is None else args.interval
     pid = args.pid if args.pid else resolve_agent_root()
-    log.info("sampling | run_dir=%s pid=%s interval=%s", run_dir, pid, args.interval)
+    log.info("sampling | run_dir=%s pid=%s interval=%s", run_dir, pid, interval)
 
     try:
-        written = run_sampler(run_dir, root_pid=pid, interval=args.interval, max_duration_s=args.max_duration)
+        written = run_sampler(run_dir, root_pid=pid, interval=interval, max_duration_s=args.max_duration)
     except Exception:
-        log_failure(log, "sampler aborted", run_dir=str(run_dir), pid=pid, interval=args.interval)
+        log_failure(log, "sampler aborted", run_dir=str(run_dir), pid=pid, interval=interval)
         return 1
 
     log.info("sampling finished | samples=%s", written)
@@ -126,37 +126,93 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
     configure(level=logging.INFO)
     log = get_logger("cli")
 
-    settings_path = Path(args.target) / ".claude" / "settings.json"
-    additions = hook_settings()
+    agent = args.agent
+    command = _hook_command()
+    outputs: list[tuple[Path, str]] = []  # (path, rendered text) to preview or write, in order
 
-    existing: dict[str, Any] = {}
-    if settings_path.exists():
-        try:
-            existing = json.loads(settings_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            log_failure(log, "existing settings unreadable, refusing to overwrite", path=str(settings_path))
+    if agent in agents.NESTED_EVENTS:
+        settings_path = agents.settings_path(agent, Path(args.target))
+        existing = _read_json(settings_path, log)
+        if existing is None:
             return 1
+        merged = agents.merge_nested(existing, agents.nested_settings(agent, command))
+        outputs.append((settings_path, json.dumps(merged, indent=2) + "\n"))
+        if agent == agents.CODEX:
+            config_path = agents.codex_config_path(Path(args.target))
+            existing_toml = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+            outputs.append((config_path, agents.ensure_codex_feature_flag(existing_toml)))
+    elif agent == agents.CURSOR:
+        settings_path = agents.settings_path(agent, Path(args.target))
+        existing = _read_json(settings_path, log)
+        if existing is None:
+            return 1
+        merged = agents.merge_cursor(existing, agents.cursor_settings(command))
+        outputs.append((settings_path, json.dumps(merged, indent=2) + "\n"))
+    elif agent == agents.HERMES:
+        import yaml
 
-    merged = _merge_hooks(existing, additions)
-    rendered = json.dumps(merged, indent=2)
-
-    if not args.write:
-        print(f"# dry run: would write {settings_path}\n# re-run with --write to apply\n{rendered}")
-        return 0
-
-    try:
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(rendered + "\n", encoding="utf-8")
-    except OSError:
-        log_failure(log, "could not write settings", path=str(settings_path))
+        settings_path = agents.settings_path(agent, Path(args.target))
+        existing_hermes: dict[str, Any] = {}
+        if settings_path.exists():
+            try:
+                existing_hermes = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+            except yaml.YAMLError:
+                log_failure(log, "existing hermes config unreadable, refusing to overwrite", path=str(settings_path))
+                return 1
+        merged = agents.merge_hermes(existing_hermes, agents.hermes_hooks_block(command))
+        outputs.append((settings_path, yaml.safe_dump(merged, sort_keys=False)))
+    else:
+        log.error("unknown agent %r", agent)
         return 1
 
-    log.info("hooks installed | path=%s", settings_path)
+    if not args.write:
+        preview = "\n".join(f"# dry run: would write {path}\n{text}" for path, text in outputs)
+        print(preview + "# re-run with --write to apply")
+        return 0
+
+    for path, text in outputs:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        except OSError:
+            log_failure(log, "could not write settings", path=str(path))
+            return 1
+        log.info("hooks installed | path=%s", path)
+
+    if agent == agents.HERMES:
+        log.info("hermes hooks require one-time consent: run `hermes hooks` to review and trust them")
+    if agent == agents.CODEX:
+        log.info("codex hooks require one-time trust: run `/hooks` inside codex to review and trust them")
+
     return 0
 
 
 def cmd_hook(_args: argparse.Namespace) -> int:
+    from features.wrapper import hook as hook_module
+
     return hook_module.main()
+
+
+def cmd_wrap(args: argparse.Namespace) -> int:
+    from features.wrapper.wrap import run_wrap
+
+    configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
+    log = get_logger("cli")
+
+    argv = args.argv[1:] if args.argv and args.argv[0] == "--" else list(args.argv)
+    if not argv:
+        log.error("wrap needs a command after --")
+        return 2
+
+    try:
+        result = run_wrap(argv, interval=args.interval)
+    except Exception:
+        log_failure(log, "wrap aborted", argv=argv)
+        return 1
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    return result.returncode
 
 
 def cmd_control_probe(args: argparse.Namespace) -> int:
@@ -245,13 +301,22 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--title", default="Stage 1 — Characterization Findings")
     analyze.set_defaults(func=cmd_analyze)
 
-    install = subparsers.add_parser("install-hooks", help="print or write Claude Code hook settings")
-    install.add_argument("--target", required=True)
+    install = subparsers.add_parser("install-hooks", help="print or write agent hook settings")
+    install.add_argument("--target", required=True, help="repo to install into (ignored for --agent hermes, which is user-global)")
+    install.add_argument("--agent", choices=agents.AGENT_CHOICES, default=agents.CLAUDE_CODE)
     install.add_argument("--write", action="store_true")
     install.set_defaults(func=cmd_install_hooks)
 
     hook_parser = subparsers.add_parser("hook", help="hook entrypoint; reads one JSON payload on stdin")
     hook_parser.set_defaults(func=cmd_hook)
+
+    wrap = subparsers.add_parser(
+        "wrap", help="run an agent with no hook system (e.g. Aider) as a child and sample it directly"
+    )
+    wrap.add_argument("--interval", type=float, default=None)
+    wrap.add_argument("--json", action="store_true")
+    wrap.add_argument("argv", nargs=argparse.REMAINDER)
+    wrap.set_defaults(func=cmd_wrap)
 
     control = subparsers.add_parser("control", help="Stage 2 per-tool-call resource control")
     control_subparsers = control.add_subparsers(dest="control_command", required=True)

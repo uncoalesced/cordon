@@ -1,0 +1,16 @@
+<svg width="1200" height="320" viewBox="0 0 1200 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Cordon">
+  <defs>
+    <pattern id="hazard" width="28" height="28" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+      <rect width="28" height="28" fill="#0d0d10"/>
+      <rect width="14" height="28" fill="#f5c400"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="320" fill="#0d0d10"/>
+  <rect width="1200" height="16" fill="url(#hazard)"/>
+  <rect y="304" width="1200" height="16" fill="url(#hazard)"/>
+  <text x="320" y="150" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="300" font-size="96" fill="#f5c400" fill-opacity="0.45">[</text>
+  <text x="880" y="150" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="300" font-size="96" fill="#f5c400" fill-opacity="0.45">]</text>
+  <text x="609" y="150" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="800" font-size="92" letter-spacing="18" fill="#f5c400">CORDON</text>
+  <text x="600" y="225" text-anchor="middle" font-family="Consolas, 'Courier New', monospace" font-size="19" letter-spacing="2" fill="#9a9a9a">tool-call-granularity resource control for AI coding agents</text>
+  <text x="600" y="258" text-anchor="middle" font-family="Consolas, 'Courier New', monospace" font-size="13" letter-spacing="3" fill="#5c5c62">AGENTCGROUP-INSPIRED &#183; EBPF &#183; CGROUP V2</text>
+</svg>

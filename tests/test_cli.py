@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
+from features.wrapper import agents
 from features.wrapper.cli import HOOK_EVENTS, _merge_hooks, build_parser, hook_settings, main
 from features.wrapper.schema import MARKERS_FILENAME, SAMPLES_FILENAME, JsonlWriter, Marker, Sample
 
@@ -49,6 +51,77 @@ def test_install_hooks_refuses_to_clobber_unreadable_settings(tmp_path: Path):
     settings_path.write_text("{ broken", encoding="utf-8")
     assert main(["install-hooks", "--target", str(tmp_path), "--write"]) == 1
     assert settings_path.read_text(encoding="utf-8") == "{ broken"
+
+
+def test_install_hooks_agent_codex_writes_hooks_json_and_feature_flag(tmp_path: Path):
+    assert main(["install-hooks", "--target", str(tmp_path), "--agent", "codex", "--write"]) == 0
+    settings = json.loads((tmp_path / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    assert set(settings["hooks"]) == {"SessionStart", "PreToolUse", "PostToolUse", "SessionEnd"}
+    config = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+    assert "codex_hooks = true" in config
+
+
+def test_install_hooks_agent_codex_preserves_an_existing_feature_table(tmp_path: Path):
+    config_path = tmp_path / ".codex" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text("[features]\nother_flag = true\n", encoding="utf-8")
+    assert main(["install-hooks", "--target", str(tmp_path), "--agent", "codex", "--write"]) == 0
+    config = config_path.read_text(encoding="utf-8")
+    assert "other_flag = true" in config
+    assert "codex_hooks = true" in config
+
+
+def test_install_hooks_agent_gemini_uses_before_after_tool_events(tmp_path: Path):
+    assert main(["install-hooks", "--target", str(tmp_path), "--agent", "gemini", "--write"]) == 0
+    settings = json.loads((tmp_path / ".gemini" / "settings.json").read_text(encoding="utf-8"))
+    assert set(settings["hooks"]) == {"SessionStart", "BeforeTool", "AfterTool", "SessionEnd"}
+
+
+def test_install_hooks_agent_cursor_writes_the_flat_shape(tmp_path: Path):
+    assert main(["install-hooks", "--target", str(tmp_path), "--agent", "cursor", "--write"]) == 0
+    settings = json.loads((tmp_path / ".cursor" / "hooks.json").read_text(encoding="utf-8"))
+    assert settings["version"] == 1
+    assert "preToolUse" in settings["hooks"]
+    assert isinstance(settings["hooks"]["preToolUse"][0]["command"], str)
+
+
+def test_install_hooks_agent_hermes_writes_yaml_to_the_hermes_home(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv(agents.ENV_HERMES_HOME, str(tmp_path))
+    assert main(["install-hooks", "--target", "ignored", "--agent", "hermes", "--write"]) == 0
+
+    import yaml
+
+    config = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert set(config["hooks"]) == {"on_session_start", "pre_tool_call", "post_tool_call", "on_session_end"}
+
+
+def test_install_hooks_agent_hermes_dry_run_writes_nothing(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv(agents.ENV_HERMES_HOME, str(tmp_path))
+    assert main(["install-hooks", "--target", "ignored", "--agent", "hermes"]) == 0
+    assert not (tmp_path / "config.yaml").exists()
+    assert "dry run" in capsys.readouterr().out
+
+
+def test_wrap_runs_the_command_and_writes_session_markers(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CORDON_RUN_ROOT", str(tmp_path))
+    rc = main(["wrap", "--", sys.executable, "-c", "import sys; sys.exit(0)"])
+    assert rc == 0
+
+    run_dirs = list(tmp_path.iterdir())
+    assert len(run_dirs) == 1
+    events = [json.loads(line)["event"] for line in (run_dirs[0] / MARKERS_FILENAME).read_text().splitlines()]
+    assert events == ["session_start", "session_end"]
+
+
+def test_wrap_passes_through_a_nonzero_exit_code(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CORDON_RUN_ROOT", str(tmp_path))
+    rc = main(["wrap", "--", sys.executable, "-c", "import sys; sys.exit(3)"])
+    assert rc == 3
+
+
+def test_wrap_without_a_command_is_a_usage_error(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CORDON_RUN_ROOT", str(tmp_path))
+    assert main(["wrap", "--"]) == 2
 
 
 def test_reduce_command_prints_summary(tmp_path: Path, capsys):
@@ -124,6 +197,32 @@ def test_control_probe_emits_json(capsys):
     main(["control", "probe", "--json"])
     names = {cap["name"] for cap in json.loads(capsys.readouterr().out)}
     assert "sched_ext" in names
+
+
+def test_control_probe_runs_on_a_host_without_psutil():
+    # The probe exists to be the first thing run on an unknown machine, so it must not need
+    # psutil, which does not build everywhere (Android is one). Run in a subprocess with psutil
+    # blocked at import, because the CLI is already imported in this one.
+    script = (
+        "import builtins, sys\n"
+        "_real = builtins.__import__\n"
+        "def _guard(name, *a, **k):\n"
+        "    if name == 'psutil' or name.startswith('psutil.'):\n"
+        "        raise ImportError('No module named psutil')\n"
+        "    return _real(name, *a, **k)\n"
+        "builtins.__import__ = _guard\n"
+        "from features.wrapper.cli import main\n"
+        "sys.exit(main(['control', 'probe']))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).resolve().parent.parent,
+    )
+    assert "psutil" not in proc.stderr
+    assert "enforcement tier:" in proc.stdout
+    assert proc.returncode in (0, 1)
 
 
 def test_control_run_passes_the_exit_code_through():

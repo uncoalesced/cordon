@@ -7,8 +7,6 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
-import psutil
-
 from features.wrapper.logging_setup import get_logger
 
 ENV_HINT = "AGENT_RESOURCE_HINT"
@@ -60,7 +58,12 @@ class Intent:
 
 
 def total_memory_bytes() -> int:
+    # Imported here, not at module scope, so that probing a host does not require psutil.
+    # psutil does not build on every target Cordon has to report on (Android is one), and the
+    # control chain is reachable from `cordon control probe`, whose whole job is to run first.
     try:
+        import psutil
+
         return int(psutil.virtual_memory().total)
     except Exception:
         get_logger("intent").warning("cannot read total memory, assuming 16GB for tier scaling")

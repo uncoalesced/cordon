@@ -1,0 +1,11 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Cordon mark">
+  <defs>
+    <pattern id="hazardMark" width="20" height="20" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+      <rect width="20" height="20" fill="#0d0d10"/>
+      <rect width="10" height="20" fill="#f5c400"/>
+    </pattern>
+  </defs>
+  <rect width="200" height="200" rx="28" fill="#0d0d10"/>
+  <rect x="0" y="144" width="200" height="32" fill="url(#hazardMark)"/>
+  <text x="100" y="118" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="900" font-size="122" fill="#f5c400">C</text>
+</svg>

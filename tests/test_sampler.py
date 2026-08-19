@@ -8,8 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from features.wrapper.sampler import TreeSampler, resolve_agent_root, run_sampler, stop_file
+from features.wrapper.sampler import AGENT_PROCESS_NAMES, TreeSampler, resolve_agent_root, run_sampler, stop_file
 from features.wrapper.schema import SAMPLES_FILENAME, JsonlWriter, read_jsonl
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["claude", "hermes", "codex", "cursor-agent", "gemini", "aider"],
+)
+def test_agent_process_names_cover_every_supported_agent(name):
+    assert name in AGENT_PROCESS_NAMES
+    assert f"{name}.exe" in AGENT_PROCESS_NAMES
 
 
 def test_resolve_agent_root_returns_a_live_pid():
