@@ -14,7 +14,14 @@ from features.wrapper.schema import DEFAULT_INTERVAL_S, SAMPLES_FILENAME, JsonlW
 
 STOP_FILENAME = "STOP"
 
-AGENT_PROCESS_NAMES = {"node", "node.exe", "claude", "claude.exe", "bun", "bun.exe"}
+AGENT_PROCESS_NAMES = {
+    "node", "node.exe", "claude", "claude.exe", "bun", "bun.exe",
+    "hermes", "hermes.exe",
+    "codex", "codex.exe",
+    "cursor-agent", "cursor-agent.exe",
+    "gemini", "gemini.exe",
+    "aider", "aider.exe",
+}
 
 _BYTES_PER_MB = 1024.0 * 1024.0
 
