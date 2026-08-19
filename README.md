@@ -16,9 +16,10 @@ container as a whole. To most resource controllers, a `pytest` run and a `git st
 just "a subprocess." Cordon tells them apart, because one needs 500MB and the other needs 13MB,
 and a single container-wide limit can't serve both well.
 
-Stage 1 measures: it hooks into Claude Code, tracks memory and CPU per tool call, and turns that
-into a report you can compare against published numbers. Stage 2 acts on what Stage 1 finds, and
-is partly built — the per-call cgroup control path and the agent-facing hint protocol work on any
+Stage 1 measures: it hooks into Claude Code, Codex CLI, Hermes Agent, Cursor CLI, or Gemini CLI
+(Aider too, at session granularity), tracks memory and CPU per tool call, and turns that into a
+report you can compare against published numbers. Stage 2 acts on what Stage 1 finds, and is
+partly built — the per-call cgroup control path and the agent-facing hint protocol work on any
 Linux with cgroup v2, while the in-kernel policy layer is still blocked on kernel features that
 aren't available yet.
 
@@ -26,8 +27,9 @@ Grounded in AgentCgroup (arXiv 2602.09345) and AgentSight (arXiv 2508.02736).
 
 ## What's built
 
-Cordon installs as four Claude Code hooks: `SessionStart`, `PreToolUse`, `PostToolUse`, and
-`SessionEnd`, all routed through `cordon hook`.
+Cordon installs as four hooks — `SessionStart`/`PreToolUse`/`PostToolUse`/`SessionEnd`, or
+whatever the target agent calls them — all routed through `cordon hook`. See [Setup](#setup)
+for the per-agent install command.
 
 When the first tool call fires, the hook starts one background sampler for the whole session
 instead of spawning a fresh process per call. A process per call would add around 100ms of
@@ -83,15 +85,89 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-## Use
+## Setup
 
-Point Cordon at the repo where the agent will actually work:
+Claude Code, Codex CLI, Hermes Agent, Cursor CLI, and Gemini CLI each shipped their own hook
+system, and every one of them is a renamed copy of the same idea: matcher + command groups,
+JSON piped to a script on stdin carrying `tool_name`/`tool_input`/`session_id`/`cwd`, exit code
+`2` (or a decision field) to block. `cordon hook` speaks that dialect for all five through one
+small alias table (`features/wrapper/agents.py`) instead of a separate binary per agent. Aider
+has no such hook system at all, so it gets a different command — see below.
+
+Pick the section for whichever agent you're running.
+
+### Claude Code
 
 ```
 .venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --write
 ```
 
-Drop `--write` first if you want to see the settings.json merge before anything gets touched.
+Drop `--write` first if you want to see the `.claude\settings.json` merge before anything gets
+touched. This is the default agent — `--agent claude-code` is implied if you omit it.
+
+### Codex CLI
+
+```
+.venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --agent codex --write
+```
+
+Writes `.codex\hooks.json` and patches `.codex\config.toml` with `[features]\ncodex_hooks =
+true` — hooks are an opt-in, still-under-development Codex feature and are off by default.
+Codex also won't run an unreviewed hook: run `/hooks` inside Codex once to trust it. Verify hooks
+actually fire on your Codex version and platform before relying on the data; this is the newest
+hook surface of the five and the most likely to have moved since this was written.
+
+### Hermes Agent
+
+```
+.venv\Scripts\cordon.exe install-hooks --agent hermes --write
+```
+
+`--target` is ignored here: Hermes hooks live in `~/.hermes/config.yaml`, a user-global file,
+not a per-repo one (set `CORDON_HERMES_HOME` to point somewhere else for testing). Same
+one-time trust step as Codex: run `hermes hooks` to approve the freshly-registered shell hook,
+unless `hooks_auto_accept: true` is already set in your config — Cordon does not set that for
+you.
+
+### Cursor CLI / Cursor Agent
+
+If you already have Claude Code hooks installed, Cursor can load `.claude\settings.json`
+directly instead of a separate config: enable *Settings → Rules, Skills, Subagents → Include
+third-party Plugins, Skills, and other configs*, and the Claude Code install above is all you
+need. Otherwise:
+
+```
+.venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --agent cursor --write
+```
+
+writes Cursor's own `.cursor\hooks.json` shape.
+
+### Gemini CLI
+
+```
+.venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --agent gemini --write
+```
+
+Hooks are enabled by default (v0.26.0+). Google has announced Gemini CLI is being superseded by
+Antigravity CLI for unpaid-tier and Google One users — check which one you're actually running
+before pointing `--agent gemini` at it.
+
+### Aider (and anything else without a hook system)
+
+Aider has no `PreToolUse`/`PostToolUse`-shaped hook system — there's no moment between "the
+agent decides to act" and "the action runs" to hook into. `cordon wrap` covers that case by
+spawning the agent itself as a direct child and sampling its exact PID, giving you one
+session-level peak/avg memory and CPU record instead of a per-tool-call breakdown:
+
+```
+.venv\Scripts\cordon.exe wrap -- aider --message "fix the failing test"
+```
+
+`cordon reduce` on a wrapped run works the same way and reports `n_toolcalls: 0` — that's
+expected, not a bug — but `cordon analyze`'s per-tool breakdown and retry-loop passes need
+paired tool-call markers, so they're not meaningful on wrap-only data.
+
+## Measure
 
 Run the agent normally. Cordon writes a sample stream and marker log per session under
 `runs\<session-id>\`. Once the session ends, reduce it into one record per tool call:
@@ -135,7 +211,7 @@ Measure what the enforcement is worth under CPU contention:
 
 ```
 assets/              logo, banner, social preview — see docs/design-language.md
-features/wrapper/   sampler, hook entrypoint, reducer, JSON-lines schema
+features/wrapper/   sampler, hook entrypoint, reducer, JSON-lines schema, agent registry, wrap
 features/analysis/  characterization passes over reduced tool-call records
 features/control/   capability probe, intent protocol, cgroup backends, guarded runner
 docs/                design notes and findings
