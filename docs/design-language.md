@@ -85,5 +85,9 @@ surfaced in the first place. Set these under **Settings → General → Topics**
 
 Repo description (the one-liner GitHub shows under the name in search and on the profile grid):
 
-> Tool-call-granularity CPU/memory characterization and control for AI coding agents, built on
-> cgroup v2 and eBPF.
+> Per-tool-call CPU/memory measurement and cgroup v2 control for AI coding agents — Claude Code,
+> Codex, Gemini, Cursor, Hermes, and Aider.
+
+Says cgroup v2, not eBPF: `sched_ext` and `memcg_bpf_ops` are the blocked, not-yet-built layer
+(see `docs/stage2-design.md`), and the description shouldn't claim a mechanism that isn't in the
+repo yet.
