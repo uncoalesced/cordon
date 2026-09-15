@@ -1,0 +1,47 @@
+name: Feature request
+description: Suggest an improvement or new capability for Cordon
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Cordon is deliberately scoped: hook-based sampling, cgroup v2 control, no
+        freeze-escalation loop or BPF today. If your request pushes past that scope,
+        say so explicitly — it helps decide whether it's a fit or a separate tool.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Sampling / instrumentation
+        - Hook support (new or existing agent)
+        - Analysis passes / findings.md
+        - Control layer (cgroup weights, feedback thresholds)
+        - CLI / install-hooks / wrap
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: The gap or friction you're hitting today
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd want Cordon to do instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried, or why existing behavior doesn't cover this

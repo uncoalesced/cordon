@@ -1,0 +1,82 @@
+name: Bug report
+description: Something in Cordon isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Cordon hooks into a coding agent's
+        tool-call lifecycle and samples cgroup/process data around it, so most bugs are
+        agent-specific or environment-specific — the fields below help narrow it down fast.
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      description: Which coding agent were you running Cordon against?
+      options:
+        - Claude Code
+        - Codex CLI
+        - Hermes Agent
+        - Cursor CLI
+        - Gemini CLI
+        - Aider (cordon wrap)
+        - Not agent-specific (CLI/analysis/control only)
+    validations:
+      required: true
+
+  - type: input
+    id: cordon-version
+    attributes:
+      label: Cordon version
+      description: Output of `cordon --version`, or the commit/tag if installed from source
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and Python version
+      placeholder: "Ubuntu 22.04, Python 3.11.8"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what actually happened instead
+      placeholder: |
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. cordon install-hooks --agent codex --target .
+        2. Run a session that ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: >
+        Paste command output, stack traces, or relevant lines from a run directory
+        (markers.jsonl, samples.jsonl, findings.md). Redact anything sensitive.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and didn't find a duplicate
+          required: true
