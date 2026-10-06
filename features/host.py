@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 from typing import IO, Any
 
@@ -33,10 +34,16 @@ OS = current_os()
 
 
 def venv_script(name: str, executable: str | None = None, os_name: str | None = None) -> Path:
-    """Console script installed next to the running interpreter: bin/<name> or Scripts\\<name>.exe."""
-    executable = sys.executable if executable is None else executable
+    """Console script installed for the running interpreter: bin/<name> or Scripts\\<name>.exe.
+
+    By default asks sysconfig: a venv keeps scripts beside python, but a system/framework Python
+    on Windows keeps them in a Scripts\\ subfolder. With an explicit executable, assume a venv.
+    """
     windows = (os.name if os_name is None else os_name) == "nt"
-    return Path(executable).with_name(f"{name}.exe" if windows else name)
+    filename = f"{name}.exe" if windows else name
+    if executable is None:
+        return Path(sysconfig.get_path("scripts")) / filename
+    return Path(executable).with_name(filename)
 
 
 def is_executable(path: Path, os_name: str | None = None) -> bool:

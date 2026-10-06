@@ -24,6 +24,12 @@ def test_venv_script_per_os():
     assert host.venv_script("cordon", r"C:\v\Scripts\python.exe", os_name="nt").name == "cordon.exe"
 
 
+def test_venv_script_default_is_this_interpreters_scripts_dir():
+    import sysconfig
+
+    assert host.venv_script("cordon").parent == Path(sysconfig.get_path("scripts"))
+
+
 def test_shell_quote_survives_posix_metacharacters():
     assert host.shell_quote("/home/a b/$x`y`/cordon", os_name="posix") == "'/home/a b/$x`y`/cordon'"
     assert host.shell_quote(r"C:\a b\cordon.exe", os_name="nt") == r'"C:\a b\cordon.exe"'
