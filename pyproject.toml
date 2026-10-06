@@ -23,6 +23,8 @@ packages = ["features", "features.wrapper", "features.analysis", "features.contr
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=features --cov-report=term-missing"
+# A test stuck for 2 minutes dumps every thread's traceback instead of silently eating the CI job.
+faulthandler_timeout = 120
 markers = ["integration: exercises a full sampler or hook cycle against real processes"]
 
 [tool.coverage.run]
