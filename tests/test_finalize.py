@@ -128,6 +128,16 @@ def test_status_clean_stops_samplers_whose_agent_is_gone(tmp_path: Path, live_sa
     assert stop_file(run_dir).exists()
 
 
+def test_clean_stops_sampler_when_agent_pid_was_recycled(tmp_path: Path, live_sampler):
+    # Live pid, wrong create_time: some other process now owns the agent's old pid.
+    run_dir = record_session(tmp_path)
+    write_pid_file(run_dir / hook_module.SAMPLER_PID_FILENAME, live_sampler.pid)
+    (run_dir / "agent.pid").write_text(f"{os.getpid()} 1.0", encoding="utf-8")
+    stop_file(run_dir).unlink(missing_ok=True)
+    assert finalize_module.clean_orphans(tmp_path) == ["s1"]
+    assert stop_file(run_dir).exists()
+
+
 def test_clean_leaves_an_active_session_alone(tmp_path: Path, live_sampler):
     run_dir = record_session(tmp_path)
     write_pid_file(run_dir / hook_module.SAMPLER_PID_FILENAME, live_sampler.pid)

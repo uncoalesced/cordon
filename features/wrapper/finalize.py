@@ -18,8 +18,8 @@ from features.wrapper.sampler import (
     ENV_IDLE_STOP,
     env_float,
     agent_pid_path,
+    identity_matches,
     idle_for,
-    process_identity,
     read_pid_file,
     stop_file,
 )
@@ -104,6 +104,7 @@ class RunStatus:
     has_report: bool
     sampler_live: bool
     agent_pid: int
+    agent_created: float | None = None
 
 
 def run_status(run_dir: Path) -> RunStatus:
@@ -133,6 +134,7 @@ def run_status(run_dir: Path) -> RunStatus:
         has_report=report_path(run_dir).exists(),
         sampler_live=sampler_running(run_dir),
         agent_pid=cached[0] if cached else agent_pid,
+        agent_created=cached[1] if cached else None,
     )
 
 
@@ -168,7 +170,8 @@ def clean_orphans(runs_root: Path, rows: list[RunStatus] | None = None, now: flo
     for row in rows:
         if not row.sampler_live:
             continue
-        root_dead = not row.agent_pid or process_identity(row.agent_pid) is None
+        # Match create_time too: a recycled pid belongs to some other process, not our agent.
+        root_dead = not row.agent_pid or not identity_matches(row.agent_pid, row.agent_created)
         if root_dead or idle_for(row.run_dir, 0.0, now) > idle_limit:
             stop_file(row.run_dir).touch()
             stopped.append(row.session)
