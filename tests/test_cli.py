@@ -187,7 +187,7 @@ def test_analyze_reports_measured_numbers(tmp_path: Path, capsys):
 
 def test_analyze_aborts_cleanly_when_loading_explodes(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
-        "features.wrapper.cli.load_dataset",
+        "features.analysis.dataset.load_dataset",
         lambda _root: (_ for _ in ()).throw(RuntimeError("disk on fire")),
     )
     assert main(["analyze", "--runs", str(tmp_path)]) == 1
@@ -253,7 +253,7 @@ def test_control_run_records_the_call(tmp_path: Path, capsys):
 
 def test_control_run_aborts_cleanly_when_the_guard_explodes(monkeypatch):
     monkeypatch.setattr(
-        "features.wrapper.cli.run_guarded",
+        "features.control.guard.run_guarded",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("cgroupfs on fire")),
     )
     assert main(["control", "run", "--", "true"]) == 1
@@ -267,7 +267,7 @@ def test_control_contend_writes_a_report(tmp_path: Path):
 
 def test_control_contend_aborts_cleanly(monkeypatch):
     monkeypatch.setattr(
-        "features.wrapper.cli.contention.run_contention",
+        "features.control.contention.run_contention",
         lambda **_k: (_ for _ in ()).throw(RuntimeError("no cores")),
     )
     assert main(["control", "contend"]) == 1

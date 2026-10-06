@@ -5,15 +5,18 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from features.wrapper import hook as hook_module
+from features.wrapper.hook import spawn_finalize as real_spawn_finalize
 from features.wrapper.hook import spawn_sampler as real_spawn_sampler
 from features.wrapper.reduce import reduce_run
-from features.wrapper.sampler import stop_file
+from features.wrapper.sampler import stop_file, write_pid_file
 from features.wrapper.schema import (
     EVENT_SESSION_END,
     EVENT_SESSION_START,
@@ -36,6 +39,7 @@ def no_real_sampler(monkeypatch):
         "spawn_sampler",
         lambda run_dir, agent_pid, interval: spawned.append((Path(run_dir), agent_pid, interval)),
     )
+    monkeypatch.setattr(hook_module, "spawn_finalize", lambda run_dir: None)
     return spawned
 
 
@@ -204,9 +208,36 @@ def test_sampler_running_is_false_without_a_usable_pid_file(run_dir: Path):
     assert hook_module.sampler_running(run_dir) is False
 
 
-def test_sampler_running_is_true_for_a_live_pid(run_dir: Path):
-    hook_module.sampler_pid_path(run_dir).write_text(str(os.getpid()), encoding="utf-8")
+@pytest.fixture
+def fake_sampler():
+    # A live process whose argv contains "sample", like the real cordon sample child.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "sample"])
+    yield proc
+    proc.kill()
+    proc.wait(timeout=5)
+
+
+def test_sampler_running_is_true_for_our_live_sampler(run_dir: Path, fake_sampler):
+    write_pid_file(hook_module.sampler_pid_path(run_dir), fake_sampler.pid)
+    assert " " in hook_module.sampler_pid_path(run_dir).read_text(encoding="utf-8")
     assert hook_module.sampler_running(run_dir) is True
+
+
+def test_sampler_running_accepts_an_old_single_pid_file_for_a_real_sampler(run_dir: Path, fake_sampler):
+    hook_module.sampler_pid_path(run_dir).write_text(str(fake_sampler.pid), encoding="utf-8")
+    assert hook_module.sampler_running(run_dir) is True
+
+
+def test_sampler_running_rejects_a_recycled_pid(run_dir: Path, fake_sampler):
+    # Same pid, different create_time: the OS reused the pid for something else.
+    hook_module.sampler_pid_path(run_dir).write_text(f"{fake_sampler.pid} 12345.0", encoding="utf-8")
+    assert hook_module.sampler_running(run_dir) is False
+
+
+def test_sampler_running_rejects_a_live_pid_that_is_not_a_sampler(run_dir: Path):
+    # Old single-pid file now pointing at an unrelated live process (pytest itself).
+    hook_module.sampler_pid_path(run_dir).write_text(str(os.getpid()), encoding="utf-8")
+    assert hook_module.sampler_running(run_dir) is False
 
 
 def test_spawn_sampler_records_pid_and_clears_stale_stop_file(run_dir: Path, monkeypatch):
@@ -218,8 +249,8 @@ def test_spawn_sampler_records_pid_and_clears_stale_stop_file(run_dir: Path, mon
     assert not stop_file(run_dir).exists()
 
 
-def test_spawn_sampler_is_a_noop_when_one_is_already_running(run_dir: Path):
-    hook_module.sampler_pid_path(run_dir).write_text(str(os.getpid()), encoding="utf-8")
+def test_spawn_sampler_is_a_noop_when_one_is_already_running(run_dir: Path, fake_sampler):
+    write_pid_file(hook_module.sampler_pid_path(run_dir), fake_sampler.pid)
     assert real_spawn_sampler(run_dir, agent_pid=os.getpid(), interval=0.25) is None
 
 
@@ -254,3 +285,49 @@ def test_full_cycle_hooks_then_reduce(tmp_path: Path):
     assert record.n_samples == 3
     assert record.avg_memory_mb == 556.667
     assert round(record.peak_memory_mb / record.avg_memory_mb, 2) == 1.71
+
+
+def test_session_end_spawns_finalize(tmp_path: Path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hook_module, "spawn_finalize", lambda run_dir: calls.append(Path(run_dir)))
+    hook_module.handle(_payload("SessionEnd"), run_root=tmp_path)
+    assert calls == [tmp_path / SESSION]
+
+
+def test_spawn_finalize_runs_detached_cli_and_logs_stderr(run_dir: Path, monkeypatch):
+    seen = {}
+
+    def fake_popen(command, **kwargs):
+        seen["command"], seen["kwargs"] = command, kwargs
+        return SimpleNamespace(pid=77)
+
+    monkeypatch.setattr(hook_module.subprocess, "Popen", fake_popen)
+    assert real_spawn_finalize(run_dir) == 77
+    assert seen["command"][-3:] == ["finalize", "--run-dir", str(run_dir)]
+    assert (run_dir / hook_module.FINALIZE_STDERR_FILENAME).exists()
+
+
+def test_spawn_finalize_survives_a_failed_spawn(run_dir: Path, monkeypatch):
+    monkeypatch.setattr(hook_module.subprocess, "Popen", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope")))
+    assert real_spawn_finalize(run_dir) is None
+
+
+def test_agent_pid_is_cached_after_the_first_event(tmp_path: Path, monkeypatch):
+    from features.wrapper import sampler as sampler_module
+
+    walks = []
+    monkeypatch.setattr(sampler_module, "resolve_agent_root", lambda: walks.append(1) or os.getpid())
+    first = hook_module.handle(_payload("PreToolUse", tool_name="Bash"), run_root=tmp_path)
+    second = hook_module.handle(_payload("PostToolUse", tool_name="Bash"), run_root=tmp_path)
+    assert first.agent_pid == second.agent_pid == os.getpid()
+    assert walks == [1]
+    assert sampler_module.read_pid_file(tmp_path / SESSION / "agent.pid")[0] == os.getpid()
+
+
+def test_stale_agent_pid_cache_is_re_resolved(tmp_path: Path, monkeypatch):
+    from features.wrapper import sampler as sampler_module
+
+    (tmp_path / SESSION).mkdir()
+    (tmp_path / SESSION / "agent.pid").write_text(f"{os.getpid()} 1.0", encoding="utf-8")
+    monkeypatch.setattr(sampler_module, "resolve_agent_root", lambda: 4321)
+    assert hook_module.handle(_payload("PreToolUse", tool_name="Bash"), run_root=tmp_path).agent_pid == 4321

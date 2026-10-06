@@ -10,11 +10,17 @@ import time
 from pathlib import Path
 from typing import Any
 
-import psutil
-
 from features import host
 from features.wrapper.logging_setup import configure, get_logger, log_failure
-from features.wrapper.sampler import DEFAULT_INTERVAL_S, resolve_agent_root, stop_file
+from features.wrapper.sampler import (
+    DEFAULT_INTERVAL_S,
+    cached_agent_root,
+    identity_matches,
+    process_identity,
+    read_pid_file,
+    stop_file,
+    write_pid_file,
+)
 from features.wrapper.schema import (
     EVENT_SESSION_END,
     EVENT_SESSION_START,
@@ -34,6 +40,7 @@ ENV_DISABLE = "CORDON_DISABLE"
 
 SAMPLER_PID_FILENAME = "sampler.pid"
 SAMPLER_STDERR_FILENAME = "sampler.stderr"
+FINALIZE_STDERR_FILENAME = "finalize.stderr"
 
 # Claude Code, Codex, Hermes, Cursor, and Gemini CLI all fire the same four lifecycle moments
 # through a hook; each just spells the event name differently. See features/wrapper/agents.py
@@ -65,10 +72,8 @@ def _interval() -> float:
 
 
 def _process_start_time(pid: int) -> float:
-    try:
-        return psutil.Process(pid).create_time()
-    except psutil.Error:
-        return time.time()
+    created = process_identity(pid)
+    return time.time() if created is None else created
 
 
 def sampler_pid_path(run_dir: Path) -> Path:
@@ -76,18 +81,36 @@ def sampler_pid_path(run_dir: Path) -> Path:
 
 
 def sampler_running(run_dir: Path) -> bool:
-    path = sampler_pid_path(run_dir)
-    if not path.exists():
+    """True only for the sampler we spawned: same pid, same create_time, and a `sample` argv."""
+    import psutil
+
+    recorded = read_pid_file(sampler_pid_path(run_dir))
+    if recorded is None or not identity_matches(*recorded):
         return False
     try:
-        pid = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return False
-    try:
-        return psutil.Process(pid).is_running()
+        return "sample" in " ".join(psutil.Process(recorded[0]).cmdline())
+    except psutil.AccessDenied:
+        # Cannot see argv; a matching create_time is still strong evidence (old files have none).
+        return recorded[1] is not None
     except psutil.Error:
         return False
 
+
+def _repo_root() -> str:
+    return str(Path(__file__).resolve().parents[2])
+
+
+def spawn_finalize(run_dir: Path) -> int | None:
+    """Detached `cordon finalize`: waits for the sampler, reduces, writes runs/<id>/report.md."""
+    command = [sys.executable, "-m", "features.wrapper.cli", "finalize", "--run-dir", str(run_dir)]
+    try:
+        with (Path(run_dir) / FINALIZE_STDERR_FILENAME).open("ab") as err:
+            proc = subprocess.Popen(command, cwd=_repo_root(), **host.detach_kwargs(err))
+    except OSError:
+        log_failure(get_logger("hook"), "finalize spawn failed", command=command, run_dir=str(run_dir))
+        return None
+    get_logger("hook").info("finalize spawned | pid=%s run_dir=%s", proc.pid, run_dir)
+    return proc.pid
 
 def spawn_sampler(run_dir: Path, agent_pid: int, interval: float) -> int | None:
     log = get_logger("hook")
@@ -114,13 +137,13 @@ def spawn_sampler(run_dir: Path, agent_pid: int, interval: float) -> int | None:
     try:
         # An import error or crash before the sampler's own logging is up would otherwise vanish.
         with (run_dir / SAMPLER_STDERR_FILENAME).open("ab") as err:
-            proc = subprocess.Popen(command, cwd=str(Path(__file__).resolve().parents[2]), **host.detach_kwargs(err))
+            proc = subprocess.Popen(command, cwd=_repo_root(), **host.detach_kwargs(err))
     except OSError:
         log_failure(log, "sampler spawn failed", command=command, run_dir=str(run_dir))
         return None
 
     try:
-        sampler_pid_path(run_dir).write_text(str(proc.pid), encoding="utf-8")
+        write_pid_file(sampler_pid_path(run_dir), proc.pid)
     except OSError:
         log_failure(log, "could not record sampler pid", pid=proc.pid, run_dir=str(run_dir))
 
@@ -150,7 +173,10 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
     # Hermes nests the tool-call id in "extra" instead of sending it top-level.
     extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
     tool_use_id = str(payload.get("tool_use_id") or extra.get("tool_call_id") or "")
-    agent_pid = resolve_agent_root()
+    # Start/Pre must import psutil anyway (sampler liveness), so they validate the cache;
+    # Post/End trust it and stay psutil-free.
+    starts = event_name in _START_EVENTS or event_name in _PRE_EVENTS
+    agent_pid = cached_agent_root(run_dir, validate=starts)
 
     if event_name in _START_EVENTS:
         marker = Marker(
@@ -193,11 +219,14 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
             agent_pid=agent_pid,
         )
         stop_file(run_dir).touch()
+        spawn_finalize(run_dir)
     else:
         log.warning("ignoring unrecognised hook event | event=%r session=%s", event_name, session_id)
         return None
 
-    marker.hook_overhead_ms = round((time.time() - _process_start_time(os.getpid())) * 1000.0, 3)
+    if starts:
+        # Only start markers' overhead is reported (reduce reads it from the tool_start marker).
+        marker.hook_overhead_ms = round((time.time() - _process_start_time(os.getpid())) * 1000.0, 3)
 
     with JsonlWriter(run_dir / MARKERS_FILENAME) as writer:
         writer.write(marker)
