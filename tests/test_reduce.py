@@ -155,3 +155,41 @@ def test_reduce_run_on_empty_dir_returns_zeroes(run_dir: Path):
     assert result.n_toolcalls == 0
     assert result.n_samples == 0
     assert result.to_dict()["tool_time_fraction"] == 0.0
+
+
+def test_call_is_charged_only_for_what_it_adds_above_the_pre_call_level(run_dir: Path):
+    # Agent tree already at 1500 MB; a cheap `sed` adds nothing, a training run adds 1000 MB.
+    _samples(run_dir, [Sample(t=t / 4, mem_mb=1500.0, cpu_pct=20.0) for t in range(0, 8)]
+             + [Sample(t=2.0, mem_mb=1510.0, cpu_pct=25.0), Sample(t=2.25, mem_mb=1505.0, cpu_pct=20.0)]
+             + [Sample(t=t / 4, mem_mb=1500.0, cpu_pct=20.0) for t in range(10, 16)]
+             + [Sample(t=4.0, mem_mb=2500.0, cpu_pct=120.0), Sample(t=4.25, mem_mb=2400.0, cpu_pct=100.0)])
+    _markers(run_dir, [_start(2.0, "a", command="sed -n 1p x"), _end(2.3, "a"),
+                       _start(4.0, "b", command="python train.py"), _end(4.3, "b")])
+    sed, train = reduce_run(run_dir).records
+    assert sed.pre_call_mb == 1500.0 and sed.delta_peak_mb == 10.0
+    assert train.delta_peak_mb == 1000.0
+    assert train.delta_cpu_pct == 90.0  # mean 110 over the window minus 20 before
+    assert sed.concurrent_calls == train.concurrent_calls == 0
+
+
+def test_first_call_with_no_prior_sample_uses_its_own_first_sample(run_dir: Path):
+    _samples(run_dir, [Sample(t=1.0, mem_mb=800.0, cpu_pct=5.0), Sample(t=1.25, mem_mb=900.0, cpu_pct=5.0)])
+    _markers(run_dir, [_start(1.0), _end(1.3)])
+    (record,) = reduce_run(run_dir).records
+    assert record.pre_call_mb == 800.0 and record.delta_peak_mb == 100.0
+
+
+def test_overlapping_calls_are_marked_shared():
+    from features.wrapper.reduce import count_overlaps
+
+    assert count_overlaps([(0.0, 5.0), (1.0, 2.0), (3.0, 4.0), (6.0, 7.0)]) == [2, 1, 1, 0]
+    assert count_overlaps([(0.0, 1.0), (1.0, 2.0)]) == [0, 0]  # touching is not overlapping
+    assert count_overlaps([]) == []
+
+
+def test_heaviest_calls_skip_interactive_tools_and_rank_by_delta(make_call):
+    from features.analysis.metrics import heaviest_calls
+
+    calls = [make_call(command="sed"), make_call(command="train"), make_call(command="plan", tool_type="ExitPlanMode")]
+    calls[0].delta_peak_mb, calls[1].delta_peak_mb, calls[2].delta_peak_mb = 5.0, 900.0, 5000.0
+    assert [c.command for c in heaviest_calls(calls)] == ["train", "sed"]

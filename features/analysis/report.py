@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence
 
-from features.analysis.metrics import DatasetMetrics, RunMetrics, ToolTypeStats
+from features.analysis.metrics import DatasetMetrics, HeavyCall, RunMetrics, ToolTypeStats
 
 PAPER = "AgentCgroup §6"
 
@@ -25,6 +25,10 @@ Definitions used here, stated because they are choices rather than givens:
   (PSS on Linux, USS on macOS, private bytes on Windows), which does not double-count pages
   shared across the tree. Older runs, and per-call peaks, use summed RSS. The per-run table
   says which one each row used.
+- **Added memory / CPU (per call)** — samples cover the whole agent process tree, and the agent
+  itself is already large and busy while it works, so a call's raw peak mostly measures the
+  agent. Each call is instead charged with how far it rose above the tree's median level in the
+  second before it started. Calls overlapping another call share that rise and are marked.
 - **Burst** — a sample exceeding baseline by more than the burst threshold (300MB by default,
   matching the paper's ">300MB" bursts).
 - **Tool time** — the union of tool-call windows, not their sum, so overlapping concurrent
@@ -184,7 +188,7 @@ def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
 
 def _tool_table(stats: Sequence[ToolTypeStats], label: str) -> str:
     return _table(
-        [label, "Calls", "Total time (s)", "Share of time", "Mean duration (s)", "Mean peak (MB)", "Max peak (MB)"],
+        [label, "Calls", "Total time (s)", "Share of time", "Mean duration (s)", "Mean added (MB)", "Max added (MB)", "Mean added CPU", "Max tree peak (MB)"],
         [
             [
                 entry.tool_type,
@@ -192,10 +196,32 @@ def _tool_table(stats: Sequence[ToolTypeStats], label: str) -> str:
                 f"{entry.total_time_s:.1f}",
                 _pct(entry.time_share),
                 f"{entry.mean_duration_s:.2f}",
-                f"{entry.mean_peak_mb:.1f}",
+                f"{entry.mean_delta_peak_mb:.1f}",
+                f"{entry.max_delta_peak_mb:.1f}",
+                f"{entry.mean_delta_cpu_pct:.0f}%",
                 f"{entry.max_peak_mb:.1f}",
             ]
             for entry in stats
+        ],
+    )
+
+
+def _heavy_table(calls: Sequence[HeavyCall]) -> str:
+    if not calls:
+        return "_No tool call rose above its pre-call level._\n"
+    return _table(
+        ["Added (MB)", "Before (MB)", "Added CPU", "Duration (s)", "Tool", "Command", "Overlap"],
+        [
+            [
+                f"{call.delta_peak_mb:.0f}",
+                f"{call.pre_call_mb:.0f}",
+                f"{call.delta_cpu_pct:.0f}%",
+                f"{call.duration_s:.1f}",
+                call.tool_type,
+                "`" + call.command[:60].replace("|", "\\|").replace("`", "'").replace("\n", " ") + "`",
+                f"shared ({call.concurrent_calls})" if call.concurrent_calls else "",
+            ]
+            for call in calls
         ],
     )
 
@@ -264,6 +290,14 @@ def render_report(dataset: DatasetMetrics, title: str = "Stage 1 — Characteriz
             ["Metric", "Measured", f"{PAPER}", "Verdict"],
             [[row.metric, row.measured, row.paper, row.verdict] for row in comparison_rows(dataset)],
         ),
+        "",
+        "## Heaviest tool calls",
+        "",
+        "Memory each call added above the agent tree's level in the second before it started. "
+        "Calls marked *shared* overlapped another tool call, so the figure is not theirs alone. "
+        "Tools that only wait on the user are left out.",
+        "",
+        _heavy_table(dataset.heaviest_calls),
         "",
         "## Per-tool-type breakdown",
         "",

@@ -16,6 +16,9 @@ BURST_THRESHOLD_MB = 300.0
 BASELINE_QUANTILE = 0.1
 RETRY_MIN_LENGTH = 3
 RETRY_TOOLS = ("Bash",)
+# Tools whose duration is the human's thinking time, not work the tool did.
+INTERACTIVE_TOOLS = ("AskUserQuestion", "ExitPlanMode", "EnterPlanMode")
+HEAVY_CALL_LIMIT = 15
 
 BASH_CATEGORIES: tuple[tuple[str, str], ...] = (
     ("test", r"\b(pytest|unittest|nosetests|tox|jest|vitest|mocha|go\s+test|cargo\s+test|mvn\s+test|npm\s+(run\s+)?test)\b"),
@@ -103,6 +106,22 @@ class ToolTypeStats:
     mean_duration_s: float = 0.0
     mean_peak_mb: float = 0.0
     max_peak_mb: float = 0.0
+    # Added on top of the pre-call level: the part of the tree's memory/CPU this tool caused.
+    mean_delta_peak_mb: float = 0.0
+    max_delta_peak_mb: float = 0.0
+    mean_delta_cpu_pct: float = 0.0
+
+
+@dataclass
+class HeavyCall:
+    task_id: str
+    tool_type: str
+    command: str
+    duration_s: float
+    pre_call_mb: float
+    delta_peak_mb: float
+    delta_cpu_pct: float
+    concurrent_calls: int
 
 
 @dataclass
@@ -155,6 +174,7 @@ class DatasetMetrics:
     correlation_mean: float | None = None
     tool_types: list[ToolTypeStats] = field(default_factory=list)
     bash_categories: list[ToolTypeStats] = field(default_factory=list)
+    heaviest_calls: list[HeavyCall] = field(default_factory=list)
     mean_bursts_in_tools_fraction: float = 0.0
     mean_sample_time_in_tools_fraction: float = 0.0
     max_change_rate_mb_per_s: float = 0.0
@@ -258,6 +278,7 @@ def _group_stats(groups: dict[str, list[ToolCallRecord]]) -> list[ToolTypeStats]
     for name, calls in groups.items():
         durations = [call.duration_s for call in calls]
         peaks = [call.peak_memory_mb for call in calls]
+        deltas = [call.delta_peak_mb for call in calls]
         stats.append(
             ToolTypeStats(
                 tool_type=name,
@@ -267,10 +288,36 @@ def _group_stats(groups: dict[str, list[ToolCallRecord]]) -> list[ToolTypeStats]
                 mean_duration_s=_mean(durations),
                 mean_peak_mb=_mean(peaks),
                 max_peak_mb=round(max(peaks), 3) if peaks else 0.0,
+                mean_delta_peak_mb=_mean(deltas),
+                max_delta_peak_mb=round(max(deltas), 3) if deltas else 0.0,
+                mean_delta_cpu_pct=_mean([call.delta_cpu_pct for call in calls]),
             )
         )
     stats.sort(key=lambda s: s.total_time_s, reverse=True)
     return stats
+
+
+def heaviest_calls(calls: Sequence[ToolCallRecord], limit: int = HEAVY_CALL_LIMIT) -> list[HeavyCall]:
+    """Calls that added the most memory above their pre-call level. Tools that only wait on the
+    user are skipped: their windows span minutes of unrelated agent activity."""
+    ranked = sorted(
+        (call for call in calls if call.tool_type not in INTERACTIVE_TOOLS and call.delta_peak_mb > 0),
+        key=lambda call: call.delta_peak_mb,
+        reverse=True,
+    )
+    return [
+        HeavyCall(
+            task_id=call.task_id,
+            tool_type=call.tool_type,
+            command=call.command,
+            duration_s=call.duration_s,
+            pre_call_mb=call.pre_call_mb,
+            delta_peak_mb=call.delta_peak_mb,
+            delta_cpu_pct=call.delta_cpu_pct,
+            concurrent_calls=call.concurrent_calls,
+        )
+        for call in ranked[:limit]
+    ]
 
 
 def tool_type_breakdown(calls: Sequence[ToolCallRecord]) -> list[ToolTypeStats]:
@@ -369,6 +416,7 @@ def analyze_dataset(runs: Sequence[Run], burst_threshold_mb: float = BURST_THRES
         runs=per_run,
         tool_types=tool_type_breakdown(all_calls),
         bash_categories=bash_category_breakdown(all_calls),
+        heaviest_calls=heaviest_calls(all_calls),
         degraded_runs=sum(1 for m in per_run if m.degraded),
     )
 

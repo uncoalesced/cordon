@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -23,6 +24,7 @@ from features.wrapper.schema import (
 )
 
 SUMMARY_FILENAME = "summary.json"
+PRE_CALL_WINDOW_S = 1.0
 
 
 @dataclass
@@ -98,6 +100,31 @@ def slice_samples(samples: list[Sample], times: list[float], start_ts: float, en
     return samples[lo:hi]
 
 
+def pre_call_level(samples: list[Sample], times: list[float], start_ts: float, window_s: float = PRE_CALL_WINDOW_S) -> tuple[float, float] | None:
+    """(memory MB, CPU %) of the agent tree just before a call starts: medians over the last
+    window_s seconds, else the last sample before start. None when nothing precedes the call."""
+    hi = bisect.bisect_left(times, start_ts)
+    if hi == 0:
+        return None
+    lo = bisect.bisect_left(times, start_ts - window_s)
+    before = samples[lo:hi] or samples[hi - 1 : hi]
+    return statistics.median(s.mem_mb for s in before), statistics.median(s.cpu_pct for s in before)
+
+
+def count_overlaps(intervals: list[tuple[float, float]]) -> list[int]:
+    """For each interval, how many others overlap it. O(n log n + overlaps)."""
+    order = sorted(range(len(intervals)), key=lambda i: intervals[i][0])
+    counts = [0] * len(intervals)
+    for pos, i in enumerate(order):
+        _, end = intervals[i]
+        for j in order[pos + 1 :]:
+            if intervals[j][0] >= end:
+                break
+            counts[i] += 1
+            counts[j] += 1
+    return counts
+
+
 def union_seconds(intervals: Iterable[tuple[float, float]]) -> float:
     ordered = sorted(intervals)
     if not ordered:
@@ -146,6 +173,10 @@ def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) ->
             cpus = [s.cpu_pct for s in window]
             if not window:
                 result.empty_windows += 1
+            peak = max(mems) if mems else 0.0
+            avg_cpu = sum(cpus) / len(cpus) if cpus else 0.0
+            # No sample before the call (it opened the session): fall back to its first sample.
+            level = pre_call_level(samples, times, start.ts) or ((mems[0], cpus[0]) if window else (0.0, 0.0))
 
             record = ToolCallRecord(
                 task_id=resolved_task_id,
@@ -162,6 +193,10 @@ def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) ->
                 n_samples=len(window),
                 exit_status=end.exit_status,
                 hook_overhead_ms=start.hook_overhead_ms,
+                pre_call_mb=round(level[0], 3),
+                delta_peak_mb=round(max(0.0, peak - level[0]), 3) if mems else 0.0,
+                pre_call_cpu_pct=round(level[1], 2),
+                delta_cpu_pct=round(max(0.0, avg_cpu - level[1]), 2) if cpus else 0.0,
             )
             result.records.append(record)
             intervals.append((start.ts, end.ts))
@@ -176,6 +211,8 @@ def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) ->
                 end_ts=end.ts,
             )
 
+    for record, overlaps in zip(result.records, count_overlaps(intervals)):
+        record.concurrent_calls = overlaps
     result.n_toolcalls = len(result.records)
     result.tool_time_s = round(union_seconds(intervals), 3)
 

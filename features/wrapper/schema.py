@@ -107,6 +107,14 @@ class ToolCallRecord:
     exit_status: str = ""
     hook_overhead_ms: float = 0.0
     schema_version: int = SCHEMA_VERSION
+    # Samples cover the whole agent tree, which is already large while the agent works, so the
+    # call's own cost is what it adds on top of the level just before it started.
+    pre_call_mb: float = 0.0
+    delta_peak_mb: float = 0.0
+    pre_call_cpu_pct: float = 0.0
+    delta_cpu_pct: float = 0.0
+    # Other tool calls overlapping this one; >0 means the delta is shared, not this call's alone.
+    concurrent_calls: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -129,6 +137,11 @@ class ToolCallRecord:
             exit_status=str(raw.get("exit_status", "")),
             hook_overhead_ms=float(raw.get("hook_overhead_ms", 0.0)),
             schema_version=int(raw.get("schema_version", SCHEMA_VERSION)),
+            pre_call_mb=float(raw.get("pre_call_mb", 0.0)),
+            delta_peak_mb=float(raw.get("delta_peak_mb", 0.0)),
+            pre_call_cpu_pct=float(raw.get("pre_call_cpu_pct", 0.0)),
+            delta_cpu_pct=float(raw.get("delta_cpu_pct", 0.0)),
+            concurrent_calls=int(raw.get("concurrent_calls", 0)),
         )
 
 
