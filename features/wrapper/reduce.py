@@ -14,6 +14,7 @@ from features.wrapper.schema import (
     EVENT_TOOL_END,
     EVENT_TOOL_START,
     MARKERS_FILENAME,
+    PROCS_FILENAME,
     SAMPLES_FILENAME,
     TOOLCALLS_FILENAME,
     JsonlWriter,
@@ -25,6 +26,7 @@ from features.wrapper.schema import (
 
 SUMMARY_FILENAME = "summary.json"
 PRE_CALL_WINDOW_S = 1.0
+BIRTH_SLACK_S = 0.5
 
 
 @dataclass
@@ -109,6 +111,58 @@ def pre_call_level(samples: list[Sample], times: list[float], start_ts: float, w
     lo = bisect.bisect_left(times, start_ts - window_s)
     before = samples[lo:hi] or samples[hi - 1 : hi]
     return statistics.median(s.mem_mb for s in before), statistics.median(s.cpu_pct for s in before)
+
+
+def load_procs(run_dir: Path) -> list[dict[str, Any]]:
+    procs = []
+    for raw in read_jsonl(Path(run_dir) / PROCS_FILENAME, quiet=True):
+        try:
+            procs.append({"pid": int(raw["pid"]), "created": float(raw["created"])})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return procs
+
+
+def assign_procs(windows: list[tuple[float, float]], procs: list[dict[str, Any]], slack_s: float = BIRTH_SLACK_S) -> list[dict[int, float]]:
+    """For each call window, {pid: created} of the processes that call started.
+
+    A process belongs to the latest call that had started by its birth and not yet ended; with
+    overlapping calls that is a guess, which concurrent_calls already flags. slack_s absorbs clock
+    skew between the hook's timestamp and the OS process start time.
+    """
+    owned: list[dict[int, float]] = [{} for _ in windows]
+    starts = sorted(range(len(windows)), key=lambda i: windows[i][0])
+    for proc in procs:
+        born = proc["created"]
+        owner = None
+        for i in starts:
+            start, end = windows[i]
+            if start - slack_s > born:
+                break
+            if born <= end + slack_s:
+                owner = i
+        if owner is not None:
+            owned[owner][proc["pid"]] = born
+    return owned
+
+
+def own_usage(window: list[Sample], own: dict[int, float]) -> tuple[float, float]:
+    """(peak MB, mean CPU %) of just the given processes across a call's samples."""
+    if not own or not window:
+        return 0.0, 0.0
+    mems, cpus = [], []
+    for sample in window:
+        kids = sample.kids or {}
+        mem = cpu = 0.0
+        for pid, born in own.items():
+            usage = kids.get(str(pid))
+            # A pid can be recycled within a run; only count it from its birth on.
+            if usage and sample.t >= born - BIRTH_SLACK_S:
+                mem += usage[0]
+                cpu += usage[1]
+        mems.append(mem)
+        cpus.append(cpu)
+    return max(mems), sum(cpus) / len(cpus)
 
 
 def count_overlaps(intervals: list[tuple[float, float]]) -> list[int]:
@@ -213,6 +267,16 @@ def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) ->
 
     for record, overlaps in zip(result.records, count_overlaps(intervals)):
         record.concurrent_calls = overlaps
+
+    procs = load_procs(run_dir)
+    if procs or any(s.kids for s in samples):
+        for record, own in zip(result.records, assign_procs(intervals, procs)):
+            window = slice_samples(samples, times, record.start_ts, record.end_ts)
+            peak, cpu = own_usage(window, own)
+            record.own_peak_mb = round(peak, 3)
+            record.own_avg_cpu_pct = round(cpu, 2)
+            record.own_procs = len(own)
+            record.attribution = "subtree"
     result.n_toolcalls = len(result.records)
     result.tool_time_s = round(union_seconds(intervals), 3)
 

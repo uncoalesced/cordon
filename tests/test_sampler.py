@@ -302,3 +302,43 @@ def test_pid_file_round_trip(run_dir: Path):
     assert not sampler_module.identity_matches(pid, created + 100)
     path.write_text("garbage")
     assert sampler_module.read_pid_file(path) is None
+
+def test_walk_stops_below_init_and_the_macos_kernel():
+    # macOS: launchd (pid 1) has the kernel (pid 0) as parent; neither may become the agent root.
+    kernel = FakeProc(0, "kernel_task", [])
+    launchd = FakeProc(1, "launchd", ["/sbin/launchd"], kernel)
+    login = FakeProc(50, "login", ["login"], launchd)
+    sh = FakeProc(51, "sh", ["/bin/sh"], login)
+    hook = FakeProc(52, *HOOK, sh)
+    procs = {p.pid: p for p in (kernel, launchd, login, sh, hook)}
+    assert resolve_agent_root(start_pid=52, lookup=procs.__getitem__) == 50
+
+
+def test_sampler_records_young_children_but_not_cordons_own(tmp_path):
+    import subprocess
+    import sys
+
+    from features.wrapper.schema import JsonlWriter, read_jsonl
+
+    tool = subprocess.Popen([sys.executable, "-c", "import time; b=b'x'*(30<<20); time.sleep(5)"])
+    own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)", "features.wrapper.cli"])
+    try:
+        with JsonlWriter(tmp_path / "procs.jsonl") as procs:
+            sampler = TreeSampler(root_pid=os.getpid(), interval=0.05, procs_writer=procs)
+            sample = None
+            for _ in range(40):  # wait until the tool child has allocated
+                sample = sampler.sample_once()
+                if sum(m for m, _ in (sample.kids or {}).values()) > 25:
+                    break
+                time.sleep(0.05)
+        # A Windows venv python.exe is a launcher whose child is the real interpreter: the tool's
+        # memory can sit in a grandchild, which is exactly why the whole young subtree is kept.
+        assert str(tool.pid) in sample.kids and str(own.pid) not in sample.kids
+        assert sum(m for m, _ in sample.kids.values()) > 25
+        recorded = list(read_jsonl(tmp_path / "procs.jsonl"))
+        assert tool.pid in {r["pid"] for r in recorded}
+        assert not any("features.wrapper.cli" in r["cmd"] for r in recorded)
+    finally:
+        for proc in (tool, own):
+            proc.kill()
+            proc.wait(timeout=5)

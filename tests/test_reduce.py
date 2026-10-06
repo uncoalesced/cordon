@@ -193,3 +193,38 @@ def test_heaviest_calls_skip_interactive_tools_and_rank_by_delta(make_call):
     calls = [make_call(command="sed"), make_call(command="train"), make_call(command="plan", tool_type="ExitPlanMode")]
     calls[0].delta_peak_mb, calls[1].delta_peak_mb, calls[2].delta_peak_mb = 5.0, 900.0, 5000.0
     assert [c.command for c in heaviest_calls(calls)] == ["train", "sed"]
+
+
+def test_assign_procs_gives_each_process_to_the_call_that_started_it():
+    from features.wrapper.reduce import assign_procs
+
+    windows = [(10.0, 20.0), (12.0, 13.0), (30.0, 31.0)]
+    procs = [{"pid": 1, "created": 10.2}, {"pid": 2, "created": 12.5}, {"pid": 3, "created": 15.0},
+             {"pid": 4, "created": 25.0}, {"pid": 5, "created": 29.8}]
+    owned = assign_procs(windows, procs)
+    assert owned == [{1: 10.2, 3: 15.0}, {2: 12.5}, {5: 29.8}]  # 4 was born between calls
+
+
+def test_subtree_attribution_ignores_the_agents_own_memory(run_dir: Path):
+    # Agent tree sits at 1500 MB and wobbles by 300 MB; the tool's own child peaks at 900 MB.
+    samples = [Sample(t=t, mem_mb=1500.0 + (300.0 if t % 1 else 0.0), cpu_pct=20.0) for t in (1.0, 1.5)]
+    samples += [Sample(t=t, mem_mb=2400.0, cpu_pct=120.0, kids={"77": [m, 100.0], "5": [50.0, 1.0]})
+                for t, m in ((2.0, 600.0), (2.5, 900.0))]
+    samples += [Sample(t=3.0, mem_mb=1800.0, cpu_pct=20.0), Sample(t=3.5, mem_mb=1800.0, cpu_pct=20.0)]
+    _samples(run_dir, samples)
+    with JsonlWriter(run_dir / "procs.jsonl") as writer:
+        writer.write({"pid": 77, "created": 2.0})  # born in the first call
+        writer.write({"pid": 5, "created": 0.1})   # long-lived, predates every call
+    _markers(run_dir, [_start(1.9, "a", command="python train.py"), _end(2.6, "a"),
+                       _start(3.0, "b", tool="Read", command="x.py"), _end(3.4, "b")])
+    train, read = reduce_run(run_dir).records
+    assert train.attribution == read.attribution == "subtree"
+    assert train.own_peak_mb == 900.0 and train.own_procs == 1 and train.own_avg_cpu_pct == 100.0
+    assert read.own_peak_mb == 0.0 and read.own_procs == 0  # in-process tool started nothing
+
+
+def test_runs_without_process_data_keep_delta_attribution(run_dir: Path):
+    _samples(run_dir, [Sample(t=1.0, mem_mb=100.0, cpu_pct=1.0), Sample(t=2.0, mem_mb=300.0, cpu_pct=1.0)])
+    _markers(run_dir, [_start(1.5), _end(2.1)])
+    (record,) = reduce_run(run_dir).records
+    assert record.attribution == "delta" and record.delta_peak_mb == 200.0

@@ -19,6 +19,7 @@ EVENT_TOOL_END = "tool_end"
 
 MARKERS_FILENAME = "markers.jsonl"
 SAMPLES_FILENAME = "samples.jsonl"
+PROCS_FILENAME = "procs.jsonl"
 TOOLCALLS_FILENAME = "toolcalls.jsonl"
 RUN_LOG_FILENAME = "cordon.log"
 
@@ -39,6 +40,9 @@ class Sample:
     # cg_mem_mb: the agent's own cgroup memory.current (Linux, only when the cgroup is exclusive).
     mem_mb_unique: float | None = None
     cg_mem_mb: float | None = None
+    # kids: {"<pid>": [rss_mb, cpu_pct]} for descendants born during the session (see procs.jsonl
+    # for who they are). Lets reduce charge a tool call only for the processes it started.
+    kids: dict[str, list[float]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -55,6 +59,7 @@ class Sample:
             partial=bool(raw.get("partial", False)),
             mem_mb_unique=None if unique is None else float(unique),
             cg_mem_mb=None if cgroup is None else float(cgroup),
+            kids=raw.get("kids") if isinstance(raw.get("kids"), dict) else None,
         )
 
 
@@ -115,6 +120,12 @@ class ToolCallRecord:
     delta_cpu_pct: float = 0.0
     # Other tool calls overlapping this one; >0 means the delta is shared, not this call's alone.
     concurrent_calls: int = 0
+    # Subtree attribution: only the processes this call started (born in its window). "subtree"
+    # when the run recorded per-process data, else "delta" (fall back to delta_peak_mb).
+    own_peak_mb: float = 0.0
+    own_avg_cpu_pct: float = 0.0
+    own_procs: int = 0
+    attribution: str = "delta"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -142,6 +153,10 @@ class ToolCallRecord:
             pre_call_cpu_pct=float(raw.get("pre_call_cpu_pct", 0.0)),
             delta_cpu_pct=float(raw.get("delta_cpu_pct", 0.0)),
             concurrent_calls=int(raw.get("concurrent_calls", 0)),
+            own_peak_mb=float(raw.get("own_peak_mb", 0.0)),
+            own_avg_cpu_pct=float(raw.get("own_avg_cpu_pct", 0.0)),
+            own_procs=int(raw.get("own_procs", 0)),
+            attribution=str(raw.get("attribution", "delta")),
         )
 
 
@@ -204,11 +219,13 @@ def append_jsonl(path: Path, obj: Any) -> bool:
         return writer.write(obj)
 
 
-def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
+def read_jsonl(path: Path, quiet: bool = False) -> Iterator[dict[str, Any]]:
+    """quiet: a missing file is expected (optional files such as procs.jsonl in older runs)."""
     log = get_logger("jsonl")
     path = Path(path)
     if not path.exists():
-        log.warning("jsonl file missing, yielding nothing | path=%s", path)
+        if not quiet:
+            log.warning("jsonl file missing, yielding nothing | path=%s", path)
         return
     with path.open("r", encoding="utf-8") as handle:
         for lineno, line in enumerate(handle, start=1):

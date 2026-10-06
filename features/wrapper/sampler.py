@@ -14,10 +14,16 @@ from features.wrapper.logging_setup import get_logger, log_failure
 from features.wrapper.schema import (
     DEFAULT_INTERVAL_S,
     MARKERS_FILENAME,
+    PROCS_FILENAME,
     SAMPLES_FILENAME,
     JsonlWriter,
     Sample,
 )
+
+# A tool's shell can be born a moment before the sampler that its own PreToolUse hook spawned.
+KID_GRACE_S = 5.0
+# argv entries (basename, .exe stripped) that mark Cordon's own hook, sampler and finalize.
+OWN_MARKERS = ("features.wrapper.cli", "cordon")
 
 # psutil is imported inside the functions that need it: the hook imports this module on every
 # tool call, and the hook path is latency-sensitive (see D7 in the plan).
@@ -121,7 +127,9 @@ def resolve_agent_root(
             parent = current.parent()
         except psutil.Error:
             break
-        if parent is None:
+        # Never climb to init/launchd (pid 1) or the macOS kernel (pid 0, launchd's parent):
+        # sampling their tree would measure the whole machine.
+        if parent is None or parent.pid <= 1:
             break
         fallback = parent.pid
         try:
@@ -254,6 +262,7 @@ class TreeSampler:
         interval: float = DEFAULT_INTERVAL_S,
         writer: JsonlWriter | None = None,
         unique_every: int | None = None,
+        procs_writer: JsonlWriter | None = None,
     ) -> None:
         self.root_pid = root_pid
         self.interval = max(0.01, float(interval))
@@ -269,6 +278,11 @@ class TreeSampler:
         self._last_unique_mb: float | None = None
         self._cgroup: Path | None = None
         self._cgroup_checked = False
+        self.procs_writer = procs_writer
+        # Only processes born after (roughly) this sampler started get per-process records: the
+        # agent's long-lived helpers (MCP servers, language servers) predate every tool call.
+        self.kids_since = time.time() - KID_GRACE_S
+        self._kid_include: dict[int, bool] = {}
 
     def _tree(self) -> list[Any]:
         import psutil
@@ -315,6 +329,34 @@ class TreeSampler:
             self._cgroup = None
             return None
 
+    def _is_kid(self, proc: Any) -> bool:
+        """A process young enough to belong to a tool call, recorded once in procs.jsonl.
+
+        Cordon's own hook/sampler/finalize processes are descendants of the agent too, and the
+        PostToolUse hook is born inside the very window it closes, so they are excluded.
+        """
+        import psutil
+
+        known = self._kid_include.get(proc.pid)
+        if known is not None:
+            return known
+        try:
+            created = proc.create_time()
+            include = created >= self.kids_since
+            cmd: list[str] = []
+            if include:
+                cmd = proc.cmdline()
+                include = not any(_stem(part) in OWN_MARKERS for part in cmd[:4])
+                if include and self.procs_writer is not None:
+                    self.procs_writer.write(
+                        {"pid": proc.pid, "ppid": proc.ppid(), "created": round(created, 3), "name": proc.name(), "cmd": " ".join(cmd)[:300]}
+                    )
+        except psutil.Error as exc:
+            self.errors[type(exc).__name__] += 1
+            return False  # retried next tick
+        self._kid_include[proc.pid] = include
+        return include
+
     def sample_once(self) -> Sample:
         import psutil
 
@@ -325,6 +367,9 @@ class TreeSampler:
         for pid in list(self._procs):
             if pid not in live_pids:
                 del self._procs[pid]
+        for pid in list(self._kid_include):
+            if pid not in live_pids:
+                del self._kid_include[pid]  # a recycled pid gets judged afresh
 
         want_unique = self.ticks % self.unique_every == 0
         mem_bytes = 0
@@ -334,16 +379,21 @@ class TreeSampler:
         counted = 0
         partial = False
 
+        kids: dict[str, list[float]] = {}
         for proc in tree:
             tracked = self._tracked(proc)
             try:
-                mem_bytes += tracked.memory_info().rss
-                cpu_pct += tracked.cpu_percent(None)
+                rss = tracked.memory_info().rss
+                cpu = tracked.cpu_percent(None)
+                mem_bytes += rss
+                cpu_pct += cpu
                 counted += 1
             except psutil.Error as exc:
                 self.errors[type(exc).__name__] += 1
                 partial = True
                 continue
+            if proc.pid != self.root_pid and self._is_kid(tracked):
+                kids[str(proc.pid)] = [round(rss / _BYTES_PER_MB, 1), round(cpu, 1)]
             if want_unique:
                 try:
                     unique += unique_bytes(tracked)
@@ -366,6 +416,7 @@ class TreeSampler:
             partial=partial,
             mem_mb_unique=self._last_unique_mb,
             cg_mem_mb=self._cgroup_mb(tree) if tree else None,
+            kids=kids or None,
         )
         self.ticks += 1
         self.tick_s_total += time.perf_counter() - started
@@ -512,6 +563,6 @@ def run_sampler(
                 return True
         return False
 
-    with JsonlWriter(run_dir / SAMPLES_FILENAME) as writer:
-        sampler = TreeSampler(root_pid=root_pid, interval=interval, writer=writer)
+    with JsonlWriter(run_dir / SAMPLES_FILENAME) as writer, JsonlWriter(run_dir / PROCS_FILENAME) as procs:
+        sampler = TreeSampler(root_pid=root_pid, interval=interval, writer=writer, procs_writer=procs)
         return sampler.run(stop_check=should_stop, max_duration_s=max_duration_s)

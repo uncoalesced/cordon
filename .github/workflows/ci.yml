@@ -76,7 +76,8 @@ jobs:
       - name: Sample a real process tree
         run: |
           # Python prints the child's real OS pid; bash's $! is an MSYS pid under Git Bash on Windows.
-          pid=$(python -c "import subprocess,sys; p=subprocess.Popen([sys.executable,'-c','import time; b=bytearray(50<<20); time.sleep(30)']); print(p.pid)")
+          # The child must not inherit stdout, or $(...) waits for it to exit.
+          pid=$(python -c "import subprocess as s,sys; p=s.Popen([sys.executable,'-c','import time; b=bytearray(50<<20); time.sleep(30)'],stdin=s.DEVNULL,stdout=s.DEVNULL,stderr=s.DEVNULL); print(p.pid)")
           cordon sample --run-dir runs/ci --pid "$pid" --interval 0.1 --max-duration 2
           test -s runs/ci/samples.jsonl
 

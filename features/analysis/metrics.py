@@ -122,6 +122,8 @@ class HeavyCall:
     delta_peak_mb: float
     delta_cpu_pct: float
     concurrent_calls: int
+    attribution: str = "delta"
+    own_procs: int = 0
 
 
 @dataclass
@@ -278,7 +280,7 @@ def _group_stats(groups: dict[str, list[ToolCallRecord]]) -> list[ToolTypeStats]
     for name, calls in groups.items():
         durations = [call.duration_s for call in calls]
         peaks = [call.peak_memory_mb for call in calls]
-        deltas = [call.delta_peak_mb for call in calls]
+        deltas = [added_mb(call) for call in calls]
         stats.append(
             ToolTypeStats(
                 tool_type=name,
@@ -290,19 +292,29 @@ def _group_stats(groups: dict[str, list[ToolCallRecord]]) -> list[ToolTypeStats]
                 max_peak_mb=round(max(peaks), 3) if peaks else 0.0,
                 mean_delta_peak_mb=_mean(deltas),
                 max_delta_peak_mb=round(max(deltas), 3) if deltas else 0.0,
-                mean_delta_cpu_pct=_mean([call.delta_cpu_pct for call in calls]),
+                mean_delta_cpu_pct=_mean([added_cpu(call) for call in calls]),
             )
         )
     stats.sort(key=lambda s: s.total_time_s, reverse=True)
     return stats
 
 
+def added_mb(call: ToolCallRecord) -> float:
+    """Memory the call itself is charged with: its own processes when the run recorded them,
+    else its rise above the pre-call level of the whole tree."""
+    return call.own_peak_mb if call.attribution == "subtree" else call.delta_peak_mb
+
+
+def added_cpu(call: ToolCallRecord) -> float:
+    return call.own_avg_cpu_pct if call.attribution == "subtree" else call.delta_cpu_pct
+
+
 def heaviest_calls(calls: Sequence[ToolCallRecord], limit: int = HEAVY_CALL_LIMIT) -> list[HeavyCall]:
     """Calls that added the most memory above their pre-call level. Tools that only wait on the
     user are skipped: their windows span minutes of unrelated agent activity."""
     ranked = sorted(
-        (call for call in calls if call.tool_type not in INTERACTIVE_TOOLS and call.delta_peak_mb > 0),
-        key=lambda call: call.delta_peak_mb,
+        (call for call in calls if call.tool_type not in INTERACTIVE_TOOLS and added_mb(call) > 0),
+        key=added_mb,
         reverse=True,
     )
     return [
@@ -312,9 +324,11 @@ def heaviest_calls(calls: Sequence[ToolCallRecord], limit: int = HEAVY_CALL_LIMI
             command=call.command,
             duration_s=call.duration_s,
             pre_call_mb=call.pre_call_mb,
-            delta_peak_mb=call.delta_peak_mb,
-            delta_cpu_pct=call.delta_cpu_pct,
+            delta_peak_mb=added_mb(call),
+            delta_cpu_pct=added_cpu(call),
             concurrent_calls=call.concurrent_calls,
+            attribution=call.attribution,
+            own_procs=call.own_procs,
         )
         for call in ranked[:limit]
     ]
