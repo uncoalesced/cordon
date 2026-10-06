@@ -34,18 +34,27 @@ class Sample:
     cpu_pct: float
     n_procs: int = 0
     partial: bool = False
+    # Optional, absent in older runs. mem_mb_unique: PSS (Linux) / USS (macOS) / private bytes
+    # (Windows) summed over the tree, so shared pages are not double-counted like RSS.
+    # cg_mem_mb: the agent's own cgroup memory.current (Linux, only when the cgroup is exclusive).
+    mem_mb_unique: float | None = None
+    cg_mem_mb: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {k: v for k, v in asdict(self).items() if v is not None}
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Sample":
+        unique = raw.get("mem_mb_unique")
+        cgroup = raw.get("cg_mem_mb")
         return cls(
             t=float(raw["t"]),
             mem_mb=float(raw["mem_mb"]),
             cpu_pct=float(raw["cpu_pct"]),
             n_procs=int(raw.get("n_procs", 0)),
             partial=bool(raw.get("partial", False)),
+            mem_mb_unique=None if unique is None else float(unique),
+            cg_mem_mb=None if cgroup is None else float(cgroup),
         )
 
 

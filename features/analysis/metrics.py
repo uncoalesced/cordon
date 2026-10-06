@@ -67,6 +67,9 @@ class ExecutionSplit:
 
 @dataclass
 class MemoryProfile:
+    # "unique" (PSS/USS/private bytes, no shared-page double count) when every sample has it,
+    # else "rss". The rss_* fields are always RSS so old and new runs stay comparable.
+    metric: str = "rss"
     baseline_mb: float = 0.0
     peak_mb: float = 0.0
     avg_mb: float = 0.0
@@ -75,6 +78,8 @@ class MemoryProfile:
     call_peak_avg_ratios: list[float] = field(default_factory=list)
     max_call_peak_avg_ratio: float = 0.0
     max_ratio_command: str = ""
+    rss_peak_mb: float = 0.0
+    rss_avg_mb: float = 0.0
 
 
 @dataclass
@@ -172,18 +177,26 @@ def execution_split(run: Run) -> ExecutionSplit:
     )
 
 
-def baseline_mb(samples: Sequence[Sample], quantile: float = BASELINE_QUANTILE) -> float:
+def baseline_mb(samples: Sequence[Sample], quantile: float = BASELINE_QUANTILE, unique: bool = False) -> float:
     if not samples:
         return 0.0
-    ordered = sorted(s.mem_mb for s in samples)
+    ordered = sorted((s.mem_mb_unique if unique else s.mem_mb) or 0.0 for s in samples)
     return round(ordered[min(int(len(ordered) * quantile), len(ordered) - 1)], 3)
 
 
+def uses_unique(samples: Sequence[Sample]) -> bool:
+    return bool(samples) and all(s.mem_mb_unique is not None for s in samples)
+
+
 def memory_profile(run: Run) -> MemoryProfile:
-    mems = [s.mem_mb for s in run.samples]
-    profile = MemoryProfile(baseline_mb=baseline_mb(run.samples))
+    unique = uses_unique(run.samples)
+    rss = [s.mem_mb for s in run.samples]
+    mems = [s.mem_mb_unique or 0.0 for s in run.samples] if unique else rss
+    profile = MemoryProfile(metric="unique" if unique else "rss", baseline_mb=baseline_mb(run.samples, unique=unique))
 
     if mems:
+        profile.rss_peak_mb = round(max(rss), 3)
+        profile.rss_avg_mb = _mean(rss)
         profile.peak_mb = round(max(mems), 3)
         profile.avg_mb = _mean(mems)
         profile.task_peak_avg_ratio = _ratio(profile.peak_mb, profile.avg_mb)

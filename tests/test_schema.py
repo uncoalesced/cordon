@@ -88,3 +88,13 @@ def test_toolcall_record_keeps_spec_field_names():
         "peak_memory_mb", "avg_memory_mb", "avg_cpu_pct", "samples",
     ):
         assert key in payload
+
+
+def test_sample_optional_memory_fields_round_trip_and_tolerate_absence():
+    from features.wrapper.schema import Sample
+
+    old = Sample.from_dict({"t": 1, "mem_mb": 2, "cpu_pct": 3})
+    assert old.mem_mb_unique is None and old.cg_mem_mb is None
+    assert "mem_mb_unique" not in old.to_dict()
+    new = Sample(t=1, mem_mb=2, cpu_pct=3, mem_mb_unique=1.5, cg_mem_mb=4.0)
+    assert Sample.from_dict(new.to_dict()) == new

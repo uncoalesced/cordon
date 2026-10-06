@@ -19,8 +19,12 @@ below come from those slices plus the uncut session stream.
 
 Definitions used here, stated because they are choices rather than givens:
 
-- **Baseline memory** — median of samples falling outside every tool-call window. This is the
-  framework's resting footprint, the layer AgentCgroup §6 measures at ~185MB.
+- **Baseline memory** — the 10th percentile of all samples in the session. This approximates
+  the framework's resting footprint, the layer AgentCgroup §6 measures at ~185MB.
+- **Memory metric** — where the sampler recorded it, per-run memory figures use unique memory
+  (PSS on Linux, USS on macOS, private bytes on Windows), which does not double-count pages
+  shared across the tree. Older runs, and per-call peaks, use summed RSS. The per-run table
+  says which one each row used.
 - **Burst** — a sample exceeding baseline by more than the burst threshold (300MB by default,
   matching the paper's ">300MB" bursts).
 - **Tool time** — the union of tool-call windows, not their sum, so overlapping concurrent
@@ -198,15 +202,17 @@ def _tool_table(stats: Sequence[ToolTypeStats], label: str) -> str:
 
 def _run_table(runs: Sequence[RunMetrics]) -> str:
     return _table(
-        ["Task", "Calls", "Span (s)", "Tool time", "Baseline (MB)", "Peak (MB)", "Peak/avg", "Retry groups", "CPU/mem r"],
+        ["Task", "Calls", "Span (s)", "Tool time", "Metric", "Baseline (MB)", "Peak (MB)", "Peak RSS (MB)", "Peak/avg", "Retry groups", "CPU/mem r"],
         [
             [
                 run.task_id[:24],
                 str(run.execution.n_toolcalls),
                 f"{run.execution.span_s:.1f}",
                 _pct(run.execution.tool_time_fraction),
+                run.memory.metric,
                 f"{run.memory.baseline_mb:.1f}",
                 f"{run.memory.peak_mb:.1f}",
+                f"{run.memory.rss_peak_mb:.1f}",
                 _num(run.memory.task_peak_avg_ratio, "×"),
                 str(run.retries.n_groups),
                 _num(run.cpu_memory_correlation),
@@ -248,7 +254,10 @@ def render_report(dataset: DatasetMetrics, title: str = "Stage 1 — Characteriz
             "",
         ]
 
+    metrics_used = sorted({run.memory.metric for run in dataset.runs})
     sections += [
+        f"Memory metric for per-run figures: {', '.join(metrics_used)} (see Methodology).",
+        "",
         "## Comparison against the paper",
         "",
         _table(

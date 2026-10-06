@@ -296,3 +296,16 @@ def test_analyze_dataset_on_no_runs_is_all_zeroes():
     assert dataset.n_runs == 0
     assert dataset.correlation_mean is None
     assert dataset.outlier_task_id == ""
+
+
+def test_memory_profile_prefers_unique_memory_but_keeps_rss(make_run):
+    from features.analysis.metrics import memory_profile
+    from features.wrapper.schema import Sample
+
+    old = make_run(samples=[Sample(t=0, mem_mb=100, cpu_pct=0), Sample(t=1, mem_mb=300, cpu_pct=0)])
+    assert memory_profile(old).metric == "rss"
+    assert memory_profile(old).peak_mb == 300
+
+    new = make_run(samples=[Sample(t=0, mem_mb=100, cpu_pct=0, mem_mb_unique=40), Sample(t=1, mem_mb=300, cpu_pct=0, mem_mb_unique=90)])
+    profile = memory_profile(new)
+    assert (profile.metric, profile.peak_mb, profile.rss_peak_mb, profile.baseline_mb) == ("unique", 90, 300, 40)
