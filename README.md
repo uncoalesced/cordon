@@ -20,11 +20,24 @@ and no single container-wide limit serves both well.
 
 It measures first, then acts on what it measures. Measurement hooks into Claude Code, Codex CLI,
 Hermes Agent, Cursor CLI, or Gemini CLI (Aider too, at a coarser grain) and tracks memory and CPU
-per tool call. Enforcement runs each guarded call in its own short-lived cgroup, sized from what
-the agent says it's about to do, and talks back when a limit actually bites. The enforcement path
-works on any Linux with cgroup v2 today; the part that would react at kernel speed instead of
-userspace speed is still waiting on kernel features that don't exist outside an RFC yet, which is
-stated plainly below rather than glossed over.
+per tool call on Linux, macOS, and Windows; when a session ends it writes a report for that
+session automatically. Enforcement is a separate, explicit command: `cordon control run -- <cmd>`
+runs one command under a limit sized from what the agent says it's about to do, and talks back
+when the limit actually bites. **Installing the hooks does not enforce anything** — the hooks only
+measure. How hard `control run` can enforce depends on the OS:
+
+| Host | Backend | What it does |
+|---|---|---|
+| Linux, cgroup v2, normal user | `cgroup2` (delegated subtree under `user@UID.service`) | real `memory.high` throttle + `cpu.weight`, PSI stall time |
+| Linux, root or writable cgroupfs | `cgroup2` (mount root) | same |
+| Linux, systemd user manager only | `systemd-run` (`--user --scope`) | same limits, applied by systemd |
+| Linux without usable cgroups (WSL1, proot, locked containers) | `advisory` | `nice` for CPU, user-space memory watchdog that warns, never kills |
+| macOS | `advisory` | `nice` + `taskpolicy -b` for CPU, memory watchdog (unique set size) |
+| Windows | `null` | runs the command unchanged, records what it would have applied |
+
+The part that would react at kernel speed instead of userspace speed is still waiting on kernel
+features that don't exist outside an RFC yet, which is stated plainly below rather than glossed
+over.
 
 Grounded in [AgentCgroup](https://arxiv.org/abs/2602.09345) and
 [AgentSight](https://arxiv.org/abs/2508.02736).
@@ -46,9 +59,17 @@ joined against the sample stream afterward. Spawning a process inside `PreToolUs
 100ms on Windows, landing directly inside the window being measured, and the idle time between
 calls is data too: the framework's baseline memory and the reasoning-versus-execution split both
 depend on sampling between calls, not just during them. The sampler walks up from the hook's own
-process to find the agent's root, then polls memory (RSS summed across the whole process tree)
-and CPU (per-process percent, summed the same way) every 250ms, since the bursts this is meant to
-catch last 1-2 seconds and can change at multiple gigabytes per second. On the reference dev
+process to find the agent's root — scoring ancestors so that `node .../@anthropic-ai/claude-code/cli.js`
+beats an unrelated `node` MCP server sitting in between (override with `CORDON_AGENT_PID`) — then
+polls memory and CPU (per-process percent, summed across the whole process tree) every 250ms, since
+the bursts this is meant to catch last 1-2 seconds and can change at multiple gigabytes per second.
+
+Summed RSS double-counts pages shared between processes (every `node` child maps the same V8 and
+libc pages), so each sample also carries `mem_mb_unique`, refreshed once a second: PSS from
+`/proc/<pid>/smaps_rollup` on Linux, unique set size on macOS, private bytes on Windows. Reports
+use it when present and say so. On Linux, if the agent already runs alone in its own cgroup (a
+`systemd-run` scope, a terminal's per-app scope), the kernel's exact `memory.current` is recorded
+as `cg_mem_mb` too. On the reference dev
 machine, one sampling tick runs a 6.82ms median against a live 10-11 process Claude Code tree,
 roughly 2.73% of one core. Re-measure this on your own machine before trusting a batch; it's the
 floor on how much Cordon disturbs what it's watching.
@@ -104,10 +125,13 @@ A freeze or OOM kill is always reported regardless of threshold. Repeats escalat
 repeat verbatim: from the third warning on the same exact command, the message notes that
 retrying it unchanged is unlikely to help.
 
-Run `cordon control probe` first to see what your machine can actually do: Linux, the capability
-bits for cgroups, cgroup v2 with `cpu`/`memory` delegated, PSI accounting, and `sched_ext`
-availability. On a machine without a working cgroup v2 mount, guarded commands still run; Cordon
-logs what it would have applied and enforces nothing.
+Run `cordon control probe` first to see what your machine can actually do: the capability bits,
+cgroup v2 at the root or delegated to your user, `systemd-run --user`, PSI accounting, `sched_ext`,
+and on macOS whether `taskpolicy` is there. It picks the strongest backend that passes a real
+write test, not just a "controllers listed" check. On the advisory backend the stall line in the
+warning reads "over its memory limit for N s" instead, because without cgroups there is no kernel
+stall accounting to read; that number is labelled `stall_source: watchdog` in the JSON so it never
+gets mixed up with PSI.
 
 The cgroup v2 interfaces above are all ordinary Linux, available without a patch. What's missing
 is the layer that would move the throttle *decision* into the kernel itself, microseconds instead
@@ -120,10 +144,41 @@ freeze is just a slower rebuild of `oomd`, the exact thing this design tries to 
 
 ## Install
 
+Python 3.11+. Two ways:
+
+**Global, recommended** — one `cordon` on your PATH, works on every OS, and avoids the
+"externally-managed-environment" (PEP 668) error on Debian/Ubuntu and Homebrew Python:
+
+```bash
+pipx install git+https://github.com/uncoalesced/cordon
 ```
-python -m venv .venv
+
+**From a checkout** (for hacking on Cordon; runs land in the repo's `runs/`):
+
+Linux / macOS:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/cordon doctor
+```
+
+Windows (PowerShell):
+
+```
+py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\cordon.exe doctor
 ```
+
+The examples below say `cordon`; from a checkout that means `.venv/bin/cordon` or
+`.venv\Scripts\cordon.exe`.
+
+`cordon doctor` answers "is this actually working?": it checks the binary is executable, the hook
+is installed for your agent, the exact hook command round-trips through the shell your agent uses
+(`sh -c` or `cmd /c`) and how long it takes, that the agent root resolves, that a sampler starts
+and stops, that a report gets written, and what enforcement tier the machine has. Every failure
+comes with the command that fixes it.
 
 ## Setup
 
@@ -135,48 +190,54 @@ hooks for whichever agents you actually run; there's no need to set up all five.
 
 ### Claude Code
 
-```
-.venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --write
+```bash
+cordon install-hooks --target path/to/task-repo --write   # this repo only
+cordon install-hooks --scope user --write                 # every repo: ~/.claude/settings.json
 ```
 
 Default agent, `--agent claude-code` is implied. Drop `--write` first to preview the merged
-`.claude\settings.json` before anything on disk changes.
+settings file before anything on disk changes. `--scope user` also bakes `--run-root` into the
+hook command, so runs land in your per-user data dir instead of whichever repo you're in:
+`~/.local/share/cordon/runs` (Linux, honours `XDG_DATA_HOME`),
+`~/Library/Application Support/cordon/runs` (macOS), `%LOCALAPPDATA%\cordon\runs` (Windows).
+On Linux/macOS the hook command is single-quoted for `sh -c`, so install paths with spaces or `$`
+work.
 
 ### Codex CLI
 
-```
-.venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --agent codex --write
+```bash
+cordon install-hooks --target path/to/task-repo --agent codex --write
 ```
 
-Writes `.codex\hooks.json` and adds `codex_hooks = true` to `.codex\config.toml`, since hooks are
+Writes `.codex/hooks.json` and adds `codex_hooks = true` to `.codex/config.toml`, since hooks are
 still opt-in there. Run `/hooks` inside Codex once to trust the newly registered hook. This is the
 newest hook surface of the five, so confirm it actually fires on your version before trusting the
 data.
 
 ### Hermes Agent
 
-```
-.venv\Scripts\cordon.exe install-hooks --agent hermes --write
+```bash
+cordon install-hooks --agent hermes --write
 ```
 
-`--target` is ignored: Hermes hooks live in `~/.hermes/config.yaml`, a user-global file (set
+No `--target` needed: Hermes hooks live in `~/.hermes/config.yaml`, a user-global file (set
 `CORDON_HERMES_HOME` to point elsewhere). Run `hermes hooks` once to trust the registered hook,
 unless `hooks_auto_accept: true` is already set.
 
 ### Cursor CLI / Cursor Agent
 
-If you've already installed Claude Code hooks, Cursor can load that same `.claude\settings.json`
+If you've already installed Claude Code hooks, Cursor can load that same `.claude/settings.json`
 directly: enable *Settings → Rules, Skills, Subagents → Include third-party Plugins, Skills, and
 other configs*. Otherwise:
 
-```
-.venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --agent cursor --write
+```bash
+cordon install-hooks --target path/to/task-repo --agent cursor --write
 ```
 
 ### Gemini CLI
 
-```
-.venv\Scripts\cordon.exe install-hooks --target C:\path\to\task-repo --agent gemini --write
+```bash
+cordon install-hooks --target path/to/task-repo --agent gemini --write
 ```
 
 Hooks are on by default from v0.26.0 onward. Google has said Gemini CLI is being superseded by
@@ -188,8 +249,8 @@ Aider has no `PreToolUse`/`PostToolUse`-shaped hook system, so `cordon wrap` spa
 itself as a direct child and samples that PID for the whole run, giving one session-level
 peak/average record instead of a per-tool-call breakdown:
 
-```
-.venv\Scripts\cordon.exe wrap -- aider --message "fix the failing test"
+```bash
+cordon wrap -- aider --message "fix the failing test"
 ```
 
 `cordon reduce` reports `n_toolcalls: 0` on a wrapped run; that's expected. `cordon analyze`'s
@@ -198,31 +259,43 @@ per-tool and retry-loop passes need paired markers, so treat wrap-only data as s
 ## Measure
 
 Run the agent normally with hooks installed. Cordon writes a marker log and sample stream per
-session under `runs\<session-id>\`. Once the session ends:
+session under `runs/<session-id>/`, and when the agent ends a session (or a turn — Claude Code's
+`Stop`) a detached `cordon finalize` reduces it and writes `runs/<session-id>/report.md`. Nothing
+to run by hand:
 
-```
-.venv\Scripts\cordon.exe reduce --run-dir runs\<session-id>
-```
-
-Then characterize a batch of reduced sessions against the source papers' numbers:
-
-```
-.venv\Scripts\cordon.exe analyze --runs runs --out docs\stage1-findings.md
+```bash
+cordon report --last          # newest session's report
+cordon report --session <id>  # a specific one
+cordon report --all           # one report across every session
+cordon status                 # every run: duration, tool calls, peak MB, report?, sampler live?
+cordon status --clean         # stop samplers whose agent is gone or idle
 ```
 
-Pass `--json` instead of `--out` for raw numbers.
+The lower-level steps are still there for batch work:
+
+```bash
+cordon reduce --run-dir runs/<session-id>
+cordon analyze --runs runs --out docs/stage1-findings.md   # --json for raw numbers
+```
+
+A sampler stops on session end, when the agent process exits, or after
+`CORDON_IDLE_STOP_S` seconds (default 1800) with no new markers — so a crashed agent that never
+sent `SessionEnd` doesn't leave one running. Per-run `cordon.log`, `sampler.stderr` and
+`finalize.stderr` hold anything that went wrong.
 
 ## Control
 
-```
-.venv\Scripts\cordon.exe control probe
-.venv\Scripts\cordon.exe control run --hint memory:high -- pytest tests/
-.venv\Scripts\cordon.exe control contend --out docs\stage2-contention.md
+```bash
+cordon control probe
+cordon control run --hint memory:high -- pytest tests/
+cordon control contend --out docs/stage2-contention.md
 ```
 
-`probe` reports what the machine can enforce. `run` guards one command in its own cgroup and
-passes its exit code through unchanged; without a working cgroup v2 mount it still runs the
-command, just unguarded. `contend` measures what enforcement is worth under synthetic CPU
+`probe` reports what the machine can enforce. `run` guards one command with the strongest
+backend available (table at the top) and passes its exit code through unchanged; with no backend
+it still runs the command, just unguarded. On a systemd distro where cgroup v2 isn't delegated to
+your user, `systemctl --user` usually is, and `run` uses a transient `systemd-run --user --scope`
+for you. `contend` measures what enforcement is worth under synthetic CPU
 contention, the same unguarded-vs-guarded shape as the source paper's own evaluation.
 
 ## Layout
@@ -231,7 +304,9 @@ contention, the same unguarded-vs-guarded shape as the source paper's own evalua
 assets/              logo, banner, social preview — see docs/design-language.md
 features/wrapper/   sampler, hook entrypoint, reducer, JSON-lines schema, agent registry, wrap
 features/analysis/  characterization passes over reduced tool-call records
-features/control/   capability probe, intent protocol, cgroup backends, guarded runner
+features/control/   capability probe, intent protocol, cgroup/systemd-run/advisory backends, guarded runner
+features/host.py     the one place Linux, macOS and Windows differ (paths, quoting, detaching, data dirs)
+scripts/             e2e_control.py, the real-OS enforcement check CI runs on Linux and macOS
 docs/                design notes and findings
 tests/                pytest suite
 ```

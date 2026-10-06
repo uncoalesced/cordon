@@ -1,5 +1,7 @@
 # Stage 2 — Control Design
 
+> CLAUDE.md §N references below point to the private project brief this was designed against; it is not part of the repository.
+
 Stage 1 measures a tool call. Stage 2 acts on it: each intercepted call runs in its own
 ephemeral cgroup, carrying limits derived from what the agent declared it was about to do, and
 the agent gets told in plain English when those limits bit.

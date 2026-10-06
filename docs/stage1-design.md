@@ -1,5 +1,7 @@
 # Stage 1 — Characterization Design
 
+> CLAUDE.md §N references below point to the private project brief this was designed against; it is not part of the repository.
+
 Scope: measure what each agent tool call actually costs in CPU and memory. No enforcement,
 no cgroups, no eBPF, no root. Runs on Windows, Linux and macOS.
 
