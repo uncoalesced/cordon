@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 import statistics
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from features.analysis.dataset import Run
 from features.wrapper.logging_setup import get_logger, log_failure
+from features.wrapper.reduce import union_seconds
 from features.wrapper.schema import Sample, ToolCallRecord
 
 BURST_THRESHOLD_MB = 300.0
@@ -41,21 +42,6 @@ def _correlation(xs: Sequence[float], ys: Sequence[float]) -> float | None:
         return round(statistics.correlation(xs, ys), 4)
     except statistics.StatisticsError:
         return None
-
-
-def union_seconds(intervals: Iterable[tuple[float, float]]) -> float:
-    ordered = sorted(intervals)
-    if not ordered:
-        return 0.0
-    total = 0.0
-    cur_start, cur_end = ordered[0]
-    for start, end in ordered[1:]:
-        if start > cur_end:
-            total += cur_end - cur_start
-            cur_start, cur_end = start, end
-        else:
-            cur_end = max(cur_end, end)
-    return total + (cur_end - cur_start)
 
 
 def in_any_window(t: float, windows: Sequence[tuple[float, float]]) -> bool:

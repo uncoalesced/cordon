@@ -6,7 +6,7 @@ import bisect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from features.wrapper.logging_setup import get_logger, log_failure
 from features.wrapper.schema import (
@@ -98,20 +98,19 @@ def slice_samples(samples: list[Sample], times: list[float], start_ts: float, en
     return samples[lo:hi]
 
 
-def _union_seconds(intervals: list[tuple[float, float]]) -> float:
-    if not intervals:
-        return 0.0
-    merged_total = 0.0
+def union_seconds(intervals: Iterable[tuple[float, float]]) -> float:
     ordered = sorted(intervals)
+    if not ordered:
+        return 0.0
+    total = 0.0
     cur_start, cur_end = ordered[0]
     for start, end in ordered[1:]:
         if start > cur_end:
-            merged_total += cur_end - cur_start
+            total += cur_end - cur_start
             cur_start, cur_end = start, end
         else:
             cur_end = max(cur_end, end)
-    merged_total += cur_end - cur_start
-    return merged_total
+    return total + (cur_end - cur_start)
 
 
 def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) -> ReduceResult:
@@ -178,7 +177,7 @@ def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) ->
             )
 
     result.n_toolcalls = len(result.records)
-    result.tool_time_s = round(_union_seconds(intervals), 3)
+    result.tool_time_s = round(union_seconds(intervals), 3)
 
     if write:
         _write_outputs(run_dir, result)

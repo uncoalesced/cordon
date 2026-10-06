@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,7 @@ from typing import Any
 from features.analysis.dataset import load_dataset
 from features.analysis.metrics import BURST_THRESHOLD_MB, analyze_dataset
 from features.analysis.report import render_report
+from features import host
 from features.control import contention, probe as probe_module
 from features.control.guard import run_guarded
 from features.control.intent import ENV_HINT as INTENT_ENV
@@ -26,22 +26,11 @@ from features.wrapper.schema import DEFAULT_INTERVAL_S, RUN_LOG_FILENAME
 # them so that `cordon control probe` — the command whose job is to run first on an unknown box
 # — does not require psutil to answer. See docs/stage2-host-audit.md.
 
-HOOK_EVENTS = agents.NESTED_EVENTS[agents.CLAUDE_CODE]
-
-
 def _hook_command() -> str:
-    script = Path(sys.executable).with_name("cordon.exe" if os.name == "nt" else "cordon")
+    script = host.venv_script("cordon")
     if script.exists():
-        return f'"{script}" hook'
-    return f'"{sys.executable}" -m features.wrapper.cli hook'
-
-
-def hook_settings() -> dict[str, Any]:
-    return agents.nested_settings(agents.CLAUDE_CODE, _hook_command())
-
-
-def _merge_hooks(existing: dict[str, Any], additions: dict[str, Any]) -> dict[str, Any]:
-    return agents.merge_nested(existing, additions)
+        return f"{host.shell_quote(str(script))} hook"
+    return f"{host.shell_quote(sys.executable)} -m features.wrapper.cli hook"
 
 
 def _read_json(path: Path, log: Any) -> dict[str, Any] | None:

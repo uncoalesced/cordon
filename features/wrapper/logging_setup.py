@@ -25,8 +25,14 @@ def configure(
     logger.setLevel(level)
     logger.propagate = False
 
-    if _configured:
+    # A second call with no log file keeps what is there (get_logger() bootstraps a stderr-only
+    # logger before the run dir is known). A call that names a log file re-targets the handlers,
+    # so the hook's per-run cordon.log actually gets written.
+    if _configured and log_path is None:
         return logger
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
 
     formatter = logging.Formatter(_FORMAT)
 

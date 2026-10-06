@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from features.control.cgroup import CgroupStats, call_cgroup_name, select_backend
-from features.control.intent import FeedbackPolicy, Intent, resolve_intent
+from features.control.intent import FeedbackPolicy, resolve_intent
 from features.wrapper.logging_setup import get_logger, log_failure
 from features.wrapper.schema import DEFAULT_INTERVAL_S, append_jsonl
 

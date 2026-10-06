@@ -9,8 +9,15 @@ import sys
 from pathlib import Path
 
 from features.wrapper import agents
-from features.wrapper.cli import HOOK_EVENTS, _merge_hooks, build_parser, hook_settings, main
+from features.wrapper.cli import _hook_command, build_parser, main
 from features.wrapper.schema import MARKERS_FILENAME, SAMPLES_FILENAME, JsonlWriter, Marker, Sample
+
+HOOK_EVENTS = agents.NESTED_EVENTS[agents.CLAUDE_CODE]
+_merge_hooks = agents.merge_nested
+
+
+def hook_settings():
+    return agents.nested_settings(agents.CLAUDE_CODE, _hook_command())
 
 
 def test_hook_settings_covers_every_lifecycle_event():

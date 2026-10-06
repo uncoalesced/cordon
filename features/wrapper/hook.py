@@ -12,6 +12,7 @@ from typing import Any
 
 import psutil
 
+from features import host
 from features.wrapper.logging_setup import configure, get_logger, log_failure
 from features.wrapper.sampler import DEFAULT_INTERVAL_S, resolve_agent_root, stop_file
 from features.wrapper.schema import (
@@ -32,6 +33,7 @@ ENV_INTERVAL = "CORDON_INTERVAL"
 ENV_DISABLE = "CORDON_DISABLE"
 
 SAMPLER_PID_FILENAME = "sampler.pid"
+SAMPLER_STDERR_FILENAME = "sampler.stderr"
 
 # Claude Code, Codex, Hermes, Cursor, and Gemini CLI all fire the same four lifecycle moments
 # through a hook; each just spells the event name differently. See features/wrapper/agents.py
@@ -109,19 +111,10 @@ def spawn_sampler(run_dir: Path, agent_pid: int, interval: float) -> int | None:
         "--interval",
         str(interval),
     ]
-    kwargs: dict[str, Any] = {
-        "cwd": str(Path(__file__).resolve().parents[2]),
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs["start_new_session"] = True
-
     try:
-        proc = subprocess.Popen(command, **kwargs)
+        # An import error or crash before the sampler's own logging is up would otherwise vanish.
+        with (run_dir / SAMPLER_STDERR_FILENAME).open("ab") as err:
+            proc = subprocess.Popen(command, cwd=str(Path(__file__).resolve().parents[2]), **host.detach_kwargs(err))
     except OSError:
         log_failure(log, "sampler spawn failed", command=command, run_dir=str(run_dir))
         return None
@@ -253,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
 
     raw = ""
     try:
-        raw = sys.stdin.read()
+        # PowerShell and some Windows shells prepend a UTF-8 BOM when piping text.
+        raw = sys.stdin.read().lstrip("﻿")
         payload = json.loads(raw) if raw.strip() else {}
     except Exception:
         log_failure(log, "could not read hook payload from stdin", raw=raw[:500])

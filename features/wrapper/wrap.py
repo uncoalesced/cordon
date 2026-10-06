@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -81,13 +80,3 @@ def run_wrap(
 
     log.info("wrap finished | argv=%s pid=%s rc=%s run_dir=%s", argv, proc.pid, returncode, run_dir)
     return WrapResult(argv=argv, session_id=session_id, run_dir=str(run_dir), returncode=returncode, start_ts=start, end_ts=end)
-
-
-def main(argv: list[str] | None = None) -> int:
-    raw = sys.argv[1:] if argv is None else argv
-    command = raw[1:] if raw and raw[0] == "--" else raw
-    if not command:
-        sys.stderr.write("cordon wrap needs a command after --\n")
-        return 2
-    result = run_wrap(command)
-    return result.returncode
