@@ -67,7 +67,15 @@ the bursts this is meant to catch last 1-2 seconds and can change at multiple gi
 Summed RSS double-counts pages shared between processes (every `node` child maps the same V8 and
 libc pages), so each sample also carries `mem_mb_unique`, refreshed once a second: PSS from
 `/proc/<pid>/smaps_rollup` on Linux, unique set size on macOS, private bytes on Windows. Reports
-use it when present and say so. On Linux, if the agent already runs alone in its own cgroup (a
+use it when present and say so. The whole-tree number is mostly the agent itself (Claude Code alone sits around 1.5 GB while it
+works), so it says little about one call. The sampler therefore also records each process born
+during the session (`procs.jsonl`, plus a per-process `kids` map in each sample), and `reduce`
+charges a call only for the processes born inside its window: the shell, `python train.py`, the
+`rg` behind a Grep. A Read or Edit runs inside the agent and starts nothing, so it is charged 0.
+Each report opens with a *Heaviest tool calls* table ranked that way; runs recorded before this
+existed fall back to how far the tree rose above its level in the second before the call.
+
+On Linux, if the agent already runs alone in its own cgroup (a
 `systemd-run` scope, a terminal's per-app scope), the kernel's exact `memory.current` is recorded
 as `cg_mem_mb` too. On the reference dev
 machine, one sampling tick runs a 6.82ms median against a live 10-11 process Claude Code tree,
