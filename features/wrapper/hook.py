@@ -53,11 +53,22 @@ _POST_EVENTS = {"PostToolUse", "post_tool_call", "postToolUse", "postToolUseFail
 _UNKNOWN_SESSION = "unknown-session"
 
 
+def is_source_checkout(package_parent: Path | None = None) -> bool:
+    """True when running from a git checkout (editable install), not a wheel in site-packages."""
+    parent = Path(__file__).resolve().parents[2] if package_parent is None else Path(package_parent)
+    if any(part.lower() in ("site-packages", "dist-packages") for part in parent.parts):
+        return False
+    return (parent / "pyproject.toml").is_file()
+
+
 def default_run_root() -> Path:
+    """CORDON_RUN_ROOT, else <repo>/runs for a source checkout, else the per-user data dir."""
     override = os.environ.get(ENV_RUN_ROOT)
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[2] / "runs"
+    if is_source_checkout():
+        return Path(__file__).resolve().parents[2] / "runs"
+    return host.user_data_dir() / "runs"
 
 
 def _interval() -> float:
@@ -267,7 +278,8 @@ def _exit_status(response: Any) -> str:
     return "ok"
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(run_root: Path | str | None = None) -> int:
+    """Hook entrypoint. run_root (from `cordon hook --run-root`) beats CORDON_RUN_ROOT and the default."""
     log = get_logger("hook")
 
     if os.environ.get(ENV_DISABLE):
@@ -283,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        handle(payload)
+        handle(payload, run_root=run_root)
     except Exception:
         log_failure(
             log,

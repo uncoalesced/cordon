@@ -20,11 +20,35 @@ from features.wrapper.schema import DEFAULT_INTERVAL_S, RUN_LOG_FILENAME
 # - psutil does not build on every host, and `cordon control probe` must answer without it.
 #   See docs/stage2-host-audit.md.
 
-def _hook_command() -> str:
-    script = host.venv_script("cordon")
-    if script.exists():
-        return f"{host.shell_quote(str(script))} hook"
-    return f"{host.shell_quote(sys.executable)} -m features.wrapper.cli hook"
+def _hook_command(run_root: Path | None = None, os_name: str | None = None) -> str:
+    """The exact string an agent runs through sh -c / cmd /c for every hook event."""
+    script = host.venv_script("cordon", os_name=os_name)
+    if host.is_executable(script, os_name=os_name):
+        command = f"{host.shell_quote(str(script), os_name=os_name)} hook"
+    else:
+        if script.exists():
+            get_logger("cli").warning("%s is not executable, hooking via the interpreter instead", script)
+        command = f"{host.shell_quote(sys.executable, os_name=os_name)} -m features.wrapper.cli hook"
+    if run_root is not None:
+        # A flag, not an inline `VAR=x cmd` prefix: cmd.exe has no such syntax.
+        command += f" --run-root {host.shell_quote(str(run_root), os_name=os_name)}"
+    return command
+
+
+def user_run_root() -> Path:
+    return host.user_data_dir() / "runs"
+
+
+def install_hook_command(agent: str, scope: str) -> str:
+    """User-global hooks fire in every repo, so their runs go to the user data dir, not the cwd."""
+    return _hook_command(user_run_root() if agents.is_user_global(agent, scope) else None)
+
+
+def install_hooks_hint(agent: str, scope: str, target: str) -> str:
+    if agent == agents.HERMES:
+        return "cordon install-hooks --agent hermes --write"
+    target_arg = f" --target {target}" if scope == agents.SCOPE_PROJECT and target != "." else ""
+    return f"cordon install-hooks --agent {agent} --scope {scope}{target_arg} --write"
 
 
 def _read_json(path: Path, log: Any) -> dict[str, Any] | None:
@@ -116,22 +140,23 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
     log = get_logger("cli")
 
     agent = args.agent
-    command = _hook_command()
+    target = agents.install_target(args.scope, args.target)
+    command = install_hook_command(agent, args.scope)
     outputs: list[tuple[Path, str]] = []  # (path, rendered text) to preview or write, in order
 
     if agent in agents.NESTED_EVENTS:
-        settings_path = agents.settings_path(agent, Path(args.target))
+        settings_path = agents.settings_path(agent, target)
         existing = _read_json(settings_path, log)
         if existing is None:
             return 1
         merged = agents.merge_nested(existing, agents.nested_settings(agent, command))
         outputs.append((settings_path, json.dumps(merged, indent=2) + "\n"))
         if agent == agents.CODEX:
-            config_path = agents.codex_config_path(Path(args.target))
+            config_path = agents.codex_config_path(target)
             existing_toml = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
             outputs.append((config_path, agents.ensure_codex_feature_flag(existing_toml)))
     elif agent == agents.CURSOR:
-        settings_path = agents.settings_path(agent, Path(args.target))
+        settings_path = agents.settings_path(agent, target)
         existing = _read_json(settings_path, log)
         if existing is None:
             return 1
@@ -140,7 +165,7 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
     elif agent == agents.HERMES:
         import yaml
 
-        settings_path = agents.settings_path(agent, Path(args.target))
+        settings_path = agents.settings_path(agent, target)
         existing_hermes: dict[str, Any] = {}
         if settings_path.exists():
             try:
@@ -176,10 +201,22 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_hook(_args: argparse.Namespace) -> int:
+def cmd_hook(args: argparse.Namespace) -> int:
     from features.wrapper import hook as hook_module
 
-    return hook_module.main()
+    return hook_module.main(run_root=getattr(args, "run_root", None))
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from features.wrapper import doctor
+
+    configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
+    results = doctor.run_checks(agent=args.agent, scope=args.scope, target=args.target)
+    if args.json:
+        print(json.dumps([r.to_dict() for r in results], indent=2))
+    else:
+        print(doctor.render(results))
+    return 1 if any(r.status == doctor.FAIL for r in results) else 0
 
 
 def cmd_wrap(args: argparse.Namespace) -> int:
@@ -360,13 +397,27 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.set_defaults(func=cmd_analyze)
 
     install = subparsers.add_parser("install-hooks", help="print or write agent hook settings")
-    install.add_argument("--target", required=True, help="repo to install into (ignored for --agent hermes, which is user-global)")
+    install.add_argument("--target", default=".", help="repo to install into for --scope project (default: cwd)")
     install.add_argument("--agent", choices=agents.AGENT_CHOICES, default=agents.CLAUDE_CODE)
+    install.add_argument(
+        "--scope",
+        choices=agents.SCOPES,
+        default=agents.SCOPE_PROJECT,
+        help="project: <target>/.<agent>/...; user: ~/.<agent>/... with runs in the user data dir (hermes is always user)",
+    )
     install.add_argument("--write", action="store_true")
     install.set_defaults(func=cmd_install_hooks)
 
     hook_parser = subparsers.add_parser("hook", help="hook entrypoint; reads one JSON payload on stdin")
+    hook_parser.add_argument("--run-root", default=None, help="where runs go; beats $CORDON_RUN_ROOT")
     hook_parser.set_defaults(func=cmd_hook)
+
+    doctor_parser = subparsers.add_parser("doctor", help="check that hooks, sampler and reports work end to end")
+    doctor_parser.add_argument("--agent", choices=agents.AGENT_CHOICES, default=agents.CLAUDE_CODE)
+    doctor_parser.add_argument("--scope", choices=agents.SCOPES, default=agents.SCOPE_PROJECT)
+    doctor_parser.add_argument("--target", default=".")
+    doctor_parser.add_argument("--json", action="store_true")
+    doctor_parser.set_defaults(func=cmd_doctor)
 
     finalize_parser = subparsers.add_parser("finalize", help="wait for the sampler, reduce, write runs/<id>/report.md")
     finalize_parser.add_argument("--run-dir", required=True)
@@ -422,9 +473,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if argv == ["hook"]:
+    if argv == ["hook"] or (len(argv) == 3 and argv[:2] == ["hook", "--run-root"]):
         # Hot path: runs on every tool call, so skip the parser and its imports.
-        return cmd_hook(argparse.Namespace())
+        return cmd_hook(argparse.Namespace(run_root=argv[2] if len(argv) == 3 else None))
     args = build_parser().parse_args(argv)
     return args.func(args)
 

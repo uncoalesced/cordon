@@ -48,6 +48,25 @@ def settings_path(agent: str, target: Path) -> Path:
     raise ValueError(f"unknown agent {agent!r}")
 
 
+SCOPE_PROJECT = "project"
+SCOPE_USER = "user"
+SCOPES = (SCOPE_PROJECT, SCOPE_USER)
+
+
+def install_target(scope: str, target: Path | str = ".") -> Path:
+    """Directory the agent config dirs hang off: the repo, or $HOME for user-global hooks.
+
+    Every agent's user-level file mirrors its project-level one under the home directory
+    (~/.claude/settings.json, ~/.codex/hooks.json, ~/.gemini/settings.json, ~/.cursor/hooks.json).
+    """
+    return Path.home() if scope == SCOPE_USER else Path(target)
+
+
+def is_user_global(agent: str, scope: str) -> bool:
+    # Hermes only reads ~/.hermes/config.yaml, so it is user-global whatever --scope says.
+    return scope == SCOPE_USER or agent == HERMES
+
+
 def hermes_home() -> Path:
     override = os.environ.get(ENV_HERMES_HOME)
     return Path(override) if override else Path.home() / ".hermes"

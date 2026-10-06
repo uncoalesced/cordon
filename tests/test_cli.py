@@ -281,3 +281,56 @@ def test_parser_requires_a_subcommand(capsys):
         assert exc.code == 2
     else:
         raise AssertionError("expected SystemExit")
+
+
+def _home(monkeypatch, tmp_path: Path) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv(agents.ENV_HERMES_HOME, raising=False)
+    return home
+
+
+def test_install_hooks_hermes_needs_no_target(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv(agents.ENV_HERMES_HOME, str(tmp_path))
+    assert main(["install-hooks", "--agent", "hermes"]) == 0
+    assert "--run-root" in capsys.readouterr().out
+    assert main(["install-hooks", "--agent", "hermes", "--write"]) == 0
+    assert (tmp_path / "config.yaml").exists()
+
+
+def test_install_hooks_user_scope_writes_every_agent_under_home(tmp_path: Path, monkeypatch):
+    home = _home(monkeypatch, tmp_path)
+    for agent in agents.AGENT_CHOICES:
+        assert main(["install-hooks", "--agent", agent, "--scope", "user", "--write"]) == 0
+    expected = [
+        home / ".claude" / "settings.json",
+        home / ".codex" / "hooks.json",
+        home / ".codex" / "config.toml",
+        home / ".gemini" / "settings.json",
+        home / ".cursor" / "hooks.json",
+        home / ".hermes" / "config.yaml",
+    ]
+    for path in expected:
+        assert path.exists(), path
+    settings = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    command = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    assert command.endswith(host_quote(str(user_runs())))
+
+
+def test_install_hooks_project_scope_has_no_run_root(tmp_path: Path):
+    assert main(["install-hooks", "--target", str(tmp_path), "--write"]) == 0
+    assert "--run-root" not in (tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8")
+
+
+def host_quote(value: str) -> str:
+    from features import host
+
+    return host.shell_quote(value)
+
+
+def user_runs() -> Path:
+    from features.wrapper.cli import user_run_root
+
+    return user_run_root()

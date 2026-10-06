@@ -331,3 +331,37 @@ def test_stale_agent_pid_cache_is_re_resolved(tmp_path: Path, monkeypatch):
     (tmp_path / SESSION / "agent.pid").write_text(f"{os.getpid()} 1.0", encoding="utf-8")
     monkeypatch.setattr(sampler_module, "resolve_agent_root", lambda: 4321)
     assert hook_module.handle(_payload("PreToolUse", tool_name="Bash"), run_root=tmp_path).agent_pid == 4321
+
+def test_source_checkout_detection(tmp_path: Path):
+    assert hook_module.is_source_checkout()  # this repo
+    (tmp_path / "pyproject.toml").write_text("", encoding="utf-8")
+    assert hook_module.is_source_checkout(tmp_path)
+    installed = tmp_path / "lib" / "site-packages"
+    installed.mkdir(parents=True)
+    (installed / "pyproject.toml").write_text("", encoding="utf-8")
+    assert not hook_module.is_source_checkout(installed)
+    assert not hook_module.is_source_checkout(tmp_path / "lib")
+
+
+def test_default_run_root_uses_the_user_data_dir_when_installed(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv(hook_module.ENV_RUN_ROOT, raising=False)
+    monkeypatch.setattr(hook_module, "is_source_checkout", lambda: False)
+    monkeypatch.setattr(hook_module.host, "user_data_dir", lambda: tmp_path / "data")
+    assert hook_module.default_run_root() == tmp_path / "data" / "runs"
+    monkeypatch.setattr(hook_module, "is_source_checkout", lambda: True)
+    assert hook_module.default_run_root() == Path(hook_module.__file__).resolve().parents[2] / "runs"
+
+
+def test_hook_run_root_flag_beats_the_env(monkeypatch, tmp_path: Path):
+    from features.wrapper.cli import main as cli_main
+
+    monkeypatch.setenv(hook_module.ENV_RUN_ROOT, str(tmp_path / "env"))
+    monkeypatch.setenv("CORDON_AGENT_PID", str(os.getpid()))
+    payload = json.dumps(_payload("PostToolUse", tool_name="Bash"))
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    assert cli_main(["hook", "--run-root", str(tmp_path / "flag")]) == 0
+    assert list((tmp_path / "flag").glob(f"*/{MARKERS_FILENAME}"))
+    assert not (tmp_path / "env").exists()
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    assert cli_main(["hook"]) == 0
+    assert list((tmp_path / "env").glob(f"*/{MARKERS_FILENAME}"))

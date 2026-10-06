@@ -39,6 +39,14 @@ def venv_script(name: str, executable: str | None = None, os_name: str | None = 
     return Path(executable).with_name(f"{name}.exe" if windows else name)
 
 
+def is_executable(path: Path, os_name: str | None = None) -> bool:
+    """A file the agent's shell can run: exists, and on POSIX carries an execute bit for us."""
+    path = Path(path)
+    if not path.is_file():
+        return False
+    return (os.name if os_name is None else os_name) == "nt" or os.access(path, os.X_OK)
+
+
 def shell_quote(value: str, os_name: str | None = None) -> str:
     """Quote one argument for the shell an agent runs hook commands through (sh -c / cmd /c)."""
     if (os.name if os_name is None else os_name) == "nt":
