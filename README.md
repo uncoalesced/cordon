@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Cordon — tool-call-granularity resource control for AI coding agents" width="720">
+  <img src="assets/banner.svg" alt="Cordon: per-tool-call resource tracking and limits for AI coding agents" width="720">
 </p>
 
 
@@ -7,316 +7,266 @@
   <a href="https://github.com/uncoalesced/cordon/actions/workflows/ci.yml"><img src="https://github.com/uncoalesced/cordon/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5c400?style=flat-square&labelColor=0d0d10" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-f5c400?style=flat-square&labelColor=0d0d10" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/measurement-cross--platform-f5c400?style=flat-square&labelColor=0d0d10" alt="Measurement: cross-platform">
-  <img src="https://img.shields.io/badge/enforcement-cgroup%20v2-9a5b00?style=flat-square&labelColor=0d0d10" alt="Enforcement: cgroup v2, kernel policy layer pending">
+  <img src="https://img.shields.io/badge/measurement-linux%20%7C%20macOS%20%7C%20windows-f5c400?style=flat-square&labelColor=0d0d10" alt="Measurement: Linux, macOS, Windows">
+  <img src="https://img.shields.io/badge/limits-linux%20cgroup%20v2%20%7C%20macOS%20advisory-9a5b00?style=flat-square&labelColor=0d0d10" alt="Limits: Linux cgroup v2, macOS advisory">
   <a href="docs/stage1-design.md"><img src="https://img.shields.io/badge/grounded%20in-AgentCgroup%20%2F%20AgentSight-0d0d10?style=flat-square&labelColor=f5c400" alt="Grounded in AgentCgroup / AgentSight"></a>
 </p>
 
 
-Cordon watches what an AI coding agent does at the level of individual tool calls, not the
-container as a whole. To most resource controllers, a `pytest` run and a `git status` both look
-like "a subprocess." Cordon tells them apart, because one needs 500MB and the other needs 13MB,
-and no single container-wide limit serves both well.
+Your coding agent runs `pytest` and `git status` a hundred times a session. To the OS they're
+both just "a subprocess of node". One wants 500 MB, the other wants 13 MB, and no single limit on
+the whole agent fits both.
 
-It measures first, then acts on what it measures. Measurement hooks into Claude Code, Codex CLI,
-Hermes Agent, Cursor CLI, or Gemini CLI (Aider too, at a coarser grain) and tracks memory and CPU
-per tool call on Linux, macOS, and Windows; when a session ends it writes a report for that
-session automatically. Enforcement is a separate, explicit command: `cordon control run -- <cmd>`
-runs one command under a limit sized from what the agent says it's about to do, and talks back
-when the limit actually bites. **Installing the hooks does not enforce anything** — the hooks only
-measure. How hard `control run` can enforce depends on the OS:
+Cordon looks at each tool call on its own. It hooks into Claude Code, Codex CLI, Gemini CLI,
+Cursor and Hermes (Aider too, more coarsely), records memory and CPU for every call, and writes
+you a report when the session ends. If you want a limit on a specific command, `cordon control
+run` gives it one, sized from what the agent says the command is about to do.
+
+It's grounded in two papers, [AgentCgroup](https://arxiv.org/abs/2602.09345) and
+[AgentSight](https://arxiv.org/abs/2508.02736), and every report checks its numbers against them.
+
+## Quick start
+
+```bash
+pipx install git+https://github.com/uncoalesced/cordon
+cordon install-hooks --scope user --write     # Claude Code, every repo
+cordon doctor                                 # is it actually working?
+```
+
+Use your agent the way you normally do. After a session:
+
+```bash
+cordon report --last
+```
+
+`pipx` puts one `cordon` on your PATH and sidesteps the "externally-managed-environment" error
+Debian, Ubuntu and Homebrew Python throw at a plain `pip install`. Working on Cordon itself:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"       # Linux, macOS
+py -3 -m venv .venv; .venv\Scripts\python.exe -m pip install -e ".[dev]"   # Windows
+```
+
+From a checkout, runs go to the repo's `runs/`. From `pipx` or `--scope user`, they go to your
+data dir: `~/.local/share/cordon/runs` on Linux (respects `XDG_DATA_HOME`),
+`~/Library/Application Support/cordon/runs` on macOS, `%LOCALAPPDATA%\cordon\runs` on Windows.
+
+## What the report tells you
+
+The table you'll look at first is *Heaviest tool calls*. Here's the top of a real one from a
+model-training repo. These sessions were recorded before per-process tracking existed, so they
+use the fallback: how far the whole tree rose above where it sat just before the call.
+
+| Added (MB) | Measured as | Duration (s) | Tool | Command |
+|---|---|---|---|---|
+| 1834 | rise over 615 MB | 10.6 | Bash | `python -u train.py --preset parentheses-0.9-300k...` |
+| 1684 | rise over 1431 MB | 12.3 | Bash | `python scripts/mqar_eval.py --parity-check` |
+| 1528 | rise over 1385 MB | 20.2 | Bash | `python -m model.backbone; python -m model.selective...` |
+
+New sessions say `own N proc(s)` there instead, and that's the number to trust.
+
+"Added" means memory from the processes that call started, and nothing else. That distinction
+matters more than I expected when I started. Claude Code itself sits around 1.5 GB while it
+works, so a naive "peak memory during the call" makes a `sed -n 1,50p` look like it ate 2 GB.
+Cordon records every process born during the session and charges each call only for its own:
+the shell, the `python train.py`, the `rg` behind a Grep. A Read or Edit runs inside the agent and
+starts nothing, so it costs 0, which is the honest answer.
+
+Below that you get per-tool and per-command-category breakdowns, retry loops (the same failing
+command three or more times in a row), how much of the session was tool time versus thinking time,
+and a comparison against the papers' numbers.
+
+`cordon status` lists every recorded session with its duration, tool call count, peak memory,
+whether it has a report, and whether its sampler is still running. `cordon status --clean` stops
+samplers whose agent has gone away.
+
+## Limits, per OS
+
+Installing the hooks doesn't limit anything. They only measure. Limits are opt-in, one command at
+a time:
+
+```bash
+cordon control probe                                  # what can this machine enforce?
+cordon control run --hint memory:high -- pytest tests/
+```
+
+What you get depends on the machine. `probe` actually creates and removes a test cgroup before it
+claims anything, so it won't tell you a backend works when it doesn't.
 
 | Host | Backend | What it does |
 |---|---|---|
-| Linux, cgroup v2, normal user | `cgroup2` (delegated subtree under `user@UID.service`) | real `memory.high` throttle + `cpu.weight`, PSI stall time |
-| Linux, root or writable cgroupfs | `cgroup2` (mount root) | same |
-| Linux, systemd user manager only | `systemd-run` (`--user --scope`) | same limits, applied by systemd |
-| Linux without usable cgroups (WSL1, proot, locked containers) | `advisory` | `nice` for CPU, user-space memory watchdog that warns, never kills |
-| macOS | `advisory` | `nice` + `taskpolicy -b` for CPU, memory watchdog (unique set size) |
-| Windows | `null` | runs the command unchanged, records what it would have applied |
+| Linux, normal user, systemd | `cgroup2`, under your own `user@UID.service` | real `memory.high` throttling and `cpu.weight`, kernel stall time (PSI) |
+| Linux, root or writable cgroupfs | `cgroup2`, at the mount root | the same |
+| Linux, only `systemctl --user` works | `systemd-run --user --scope` | the same limits, applied by systemd |
+| Linux without usable cgroups (WSL1, proot, locked-down containers) | `advisory` | `nice` for CPU, a memory watchdog that warns |
+| macOS | `advisory` | `nice`, plus `taskpolicy -b` for low-priority work, and a memory watchdog |
+| Windows | `null` | runs the command untouched and records what it would have applied |
 
-The part that would react at kernel speed instead of userspace speed is still waiting on kernel
-features that don't exist outside an RFC yet, which is stated plainly below rather than glossed
-over.
+The first row is the one most Linux desktops land on, and it needs no sudo. Earlier versions of
+Cordon only tried the cgroup root, which meant nobody without root got real limits.
 
-Grounded in [AgentCgroup](https://arxiv.org/abs/2602.09345) and
-[AgentSight](https://arxiv.org/abs/2508.02736).
+Hints set the size. `AGENT_RESOURCE_HINT=memory:high` (or `--hint`) picks a tier:
 
-## How Cordon works
-
-Claude Code, Codex CLI, Gemini CLI, Cursor, and Hermes each fire a `PreToolUse`-and-`PostToolUse`
-pair of events around every tool call, with a JSON payload on stdin (`session_id`, `cwd`,
-`tool_name`, `tool_input`, and `tool_response` on the post side). Cordon registers `cordon hook`
-against all of them and normalizes the differences through one alias table
-(`features/wrapper/agents.py`) instead of shipping five separate integrations. This was a
-deliberate choice over patching each framework's tool-use loop directly, since that breaks on
-every release and instruments internals that churn. Hooks are a stable boundary the agent can't
-route around.
-
-On the first hook firing, Cordon starts one background sampler for the whole session rather than
-spawning a fresh process per call, and lets the hooks write cheap timestamped markers that get
-joined against the sample stream afterward. Spawning a process inside `PreToolUse` costs roughly
-100ms on Windows, landing directly inside the window being measured, and the idle time between
-calls is data too: the framework's baseline memory and the reasoning-versus-execution split both
-depend on sampling between calls, not just during them. The sampler walks up from the hook's own
-process to find the agent's root — scoring ancestors so that `node .../@anthropic-ai/claude-code/cli.js`
-beats an unrelated `node` MCP server sitting in between (override with `CORDON_AGENT_PID`) — then
-polls memory and CPU (per-process percent, summed across the whole process tree) every 250ms, since
-the bursts this is meant to catch last 1-2 seconds and can change at multiple gigabytes per second.
-
-Summed RSS double-counts pages shared between processes (every `node` child maps the same V8 and
-libc pages), so each sample also carries `mem_mb_unique`, refreshed once a second: PSS from
-`/proc/<pid>/smaps_rollup` on Linux, unique set size on macOS, private bytes on Windows. Reports
-use it when present and say so. The whole-tree number is mostly the agent itself (Claude Code alone sits around 1.5 GB while it
-works), so it says little about one call. The sampler therefore also records each process born
-during the session (`procs.jsonl`, plus a per-process `kids` map in each sample), and `reduce`
-charges a call only for the processes born inside its window: the shell, `python train.py`, the
-`rg` behind a Grep. A Read or Edit runs inside the agent and starts nothing, so it is charged 0.
-Each report opens with a *Heaviest tool calls* table ranked that way; runs recorded before this
-existed fall back to how far the tree rose above its level in the second before the call.
-
-On Linux, if the agent already runs alone in its own cgroup (a
-`systemd-run` scope, a terminal's per-app scope), the kernel's exact `memory.current` is recorded
-as `cg_mem_mb` too. On the reference dev
-machine, one sampling tick runs a 6.82ms median against a live 10-11 process Claude Code tree,
-roughly 2.73% of one core. Re-measure this on your own machine before trusting a batch; it's the
-floor on how much Cordon disturbs what it's watching.
-
-`cordon reduce` joins markers to samples into `toolcalls.jsonl`, one record per tool call with
-start/end time, peak and average memory, average CPU, and the raw per-tick samples (kept raw
-because later analysis needs to see how a burst is shaped, not just how big it got). Not every
-agent's hook payload carries a stable tool-call ID, so pairing falls back to
-`session_id + tool_name + canonical(tool_input)`, matched last-in-first-out; the rare case of two
-byte-identical concurrent calls gets counted in `unpaired_starts`/`orphan_ends` rather than
-guessed at silently.
-
-`cordon analyze` runs the reduced data through five passes (execution-time split,
-peak-to-average memory ratio, per-tool breakdown, retry-loop detection, CPU/memory correlation)
-plus two burst measures, and renders a report with a measured-versus-paper verdict for each one.
-Two judgment calls worth knowing about: baseline memory is the 10th percentile of the session's
-samples rather than the median of non-tool-call samples, since a session dominated by bursty
-calls would otherwise poison its own baseline. And a retry group is three or more strictly
-consecutive identical calls, matching the source paper's definition, which undercounts the
-common pattern of a failing `pytest` alternating with a `Read`/`Edit` in between (`retry_profile`
-takes an `ignore_tools` argument to relax this).
-
-Every hook path exits `0` no matter what happens internally, and every sampling or analysis
-failure is logged and skipped rather than raised. A broken measurement must never break the agent
-being measured.
-
-### Acting on what it finds
-
-Enforcement runs one guarded command inside a single ephemeral cgroup (`tool_<pid>_<timestamp>`),
-created right before the subprocess spawns and torn down right after it exits. Limits come from
-what the agent says it's about to do: setting `AGENT_RESOURCE_HINT=memory:high` before a call
-resolves to a `memory.high` soft limit and a `cpu.weight` for that call alone.
-
-| Tier | Fraction of RAM | On 16GB | `cpu.weight` |
+| Tier | Share of RAM | On 16 GB | `cpu.weight` |
 |---|---|---|---|
 | `low` | 2.5% | 410 MB | 25 |
 | `medium` (default) | 10% | 1.6 GB | 100 |
 | `high` | 35% | 5.7 GB | 400 |
-| `max` | unlimited | — | 1000 |
+| `max` | unlimited | n/a | 1000 |
 
-Hints are advisory, never trusted blindly: crossing `memory.high` throttles under pressure, it
-doesn't kill. Only `memory.high` gets set, never `memory.max`, because an OOM kill destroys
-whatever context the agent had already built up. A call whose cumulative memory stall (read from
-PSI, not an event counter) exceeds `max(200ms, 5% of that call's wall time)` gets a plain-language
-note appended to its stderr once it exits:
+Cordon only ever sets `memory.high`, never `memory.max`. Going over throttles the command, it
+doesn't kill it, because an OOM kill throws away whatever the agent had built up. When a limit
+actually bites (memory stall above 200 ms or 5% of the call's runtime, whichever is bigger), the
+agent gets a note on stderr:
 
 > `[cordon]` This tool call was resource-limited. It peaked at 1842.0 MB against a memory:medium
 > limit of 1638.4 MB. It stalled 1.50s (54% of its 2.8s runtime) waiting on memory. Consider
 > narrowing the scope of this command. If it genuinely needs more, set
 > `AGENT_RESOURCE_HINT=memory:high` before retrying.
 
-A freeze or OOM kill is always reported regardless of threshold. Repeats escalate rather than
-repeat verbatim: from the third warning on the same exact command, the message notes that
-retrying it unchanged is unlikely to help.
+From the third warning on the same command, the note also says that retrying it unchanged
+probably won't help.
 
-Run `cordon control probe` first to see what your machine can actually do: the capability bits,
-cgroup v2 at the root or delegated to your user, `systemd-run --user`, PSI accounting, `sched_ext`,
-and on macOS whether `taskpolicy` is there. It picks the strongest backend that passes a real
-write test, not just a "controllers listed" check. On the advisory backend the stall line in the
-warning reads "over its memory limit for N s" instead, because without cgroups there is no kernel
-stall accounting to read; that number is labelled `stall_source: watchdog` in the JSON so it never
-gets mixed up with PSI.
+On macOS and cgroup-less Linux there's no kernel throttle to lean on, so the watchdog can only
+tell you the command spent N seconds over its limit. The JSON labels that number
+`stall_source: watchdog`, so it never gets mistaken for real stall time. I'd rather be clear that
+this is soft than pretend it's a hard limit.
 
-The cgroup v2 interfaces above are all ordinary Linux, available without a patch. What's missing
-is the layer that would move the throttle *decision* into the kernel itself, microseconds instead
-of a userspace loop's tens of milliseconds, which is what actually matters against a burst that
-lasts a second or two. That needs `sched_ext` (Linux 6.12+) for CPU policy and a not-yet-upstream
-`memcg_bpf_ops` RFC for memory policy. Neither is stubbed or faked; `cordon control probe` reports
-both as absent on a machine that lacks them. There's also no automatic freeze-escalation loop
-above the throttle on purpose, since a userspace loop that polls pressure and decides when to
-freeze is just a slower rebuild of `oomd`, the exact thing this design tries to avoid.
+What's still missing on Linux: the throttle decision happens in a userspace loop measured in tens
+of milliseconds, against bursts that last a second or two. Moving it into the kernel needs
+`sched_ext` (Linux 6.12+) for CPU and the `memcg_bpf_ops` patch series for memory, which isn't
+upstream. `probe` reports both, and neither is faked. I also left out an automatic freeze loop on
+purpose. A userspace loop that watches pressure and decides when to freeze is just a slower
+`oomd`.
 
-## Install
+## Setting up each agent
 
-Python 3.11+. Two ways:
+All five agents shipped a hook system, and all five are basically the same idea with different
+names: a matcher, a command, JSON on stdin. `cordon hook` speaks all of them. Drop `--write` to
+preview the merged settings file first.
 
-**Global, recommended** — one `cordon` on your PATH, works on every OS, and avoids the
-"externally-managed-environment" (PEP 668) error on Debian/Ubuntu and Homebrew Python:
+**Claude Code**
 
 ```bash
-pipx install git+https://github.com/uncoalesced/cordon
+cordon install-hooks --target path/to/repo --write   # one repo
+cordon install-hooks --scope user --write            # every repo (~/.claude/settings.json)
 ```
 
-**From a checkout** (for hacking on Cordon; runs land in the repo's `runs/`):
-
-Linux / macOS:
+**Codex CLI**
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/cordon doctor
+cordon install-hooks --target path/to/repo --agent codex --write
 ```
 
-Windows (PowerShell):
+This writes `.codex/hooks.json` and turns on `codex_hooks = true` in `.codex/config.toml`, since
+hooks are still opt-in there. Run `/hooks` inside Codex once to trust it. It's the newest hook
+system of the five, so check that it fires on your version before trusting the numbers.
 
-```
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.venv\Scripts\cordon.exe doctor
-```
-
-The examples below say `cordon`; from a checkout that means `.venv/bin/cordon` or
-`.venv\Scripts\cordon.exe`.
-
-`cordon doctor` answers "is this actually working?": it checks the binary is executable, the hook
-is installed for your agent, the exact hook command round-trips through the shell your agent uses
-(`sh -c` or `cmd /c`) and how long it takes, that the agent root resolves, that a sampler starts
-and stops, that a report gets written, and what enforcement tier the machine has. Every failure
-comes with the command that fixes it.
-
-## Setup
-
-Claude Code, Codex CLI, Hermes Agent, Cursor CLI, and Gemini CLI each shipped their own hook
-system, and all five are a renamed copy of the same idea: matcher-and-command groups, JSON on
-stdin, exit code `2` (or a decision field) to block. `cordon hook` speaks all five dialects
-through one alias table. Aider has no hook system at all, so it gets a different command. Install
-hooks for whichever agents you actually run; there's no need to set up all five.
-
-### Claude Code
-
-```bash
-cordon install-hooks --target path/to/task-repo --write   # this repo only
-cordon install-hooks --scope user --write                 # every repo: ~/.claude/settings.json
-```
-
-Default agent, `--agent claude-code` is implied. Drop `--write` first to preview the merged
-settings file before anything on disk changes. `--scope user` also bakes `--run-root` into the
-hook command, so runs land in your per-user data dir instead of whichever repo you're in:
-`~/.local/share/cordon/runs` (Linux, honours `XDG_DATA_HOME`),
-`~/Library/Application Support/cordon/runs` (macOS), `%LOCALAPPDATA%\cordon\runs` (Windows).
-On Linux/macOS the hook command is single-quoted for `sh -c`, so install paths with spaces or `$`
-work.
-
-### Codex CLI
-
-```bash
-cordon install-hooks --target path/to/task-repo --agent codex --write
-```
-
-Writes `.codex/hooks.json` and adds `codex_hooks = true` to `.codex/config.toml`, since hooks are
-still opt-in there. Run `/hooks` inside Codex once to trust the newly registered hook. This is the
-newest hook surface of the five, so confirm it actually fires on your version before trusting the
-data.
-
-### Hermes Agent
+**Hermes Agent**
 
 ```bash
 cordon install-hooks --agent hermes --write
 ```
 
-No `--target` needed: Hermes hooks live in `~/.hermes/config.yaml`, a user-global file (set
-`CORDON_HERMES_HOME` to point elsewhere). Run `hermes hooks` once to trust the registered hook,
-unless `hooks_auto_accept: true` is already set.
+Hermes only reads `~/.hermes/config.yaml` (or `CORDON_HERMES_HOME`), so there's no `--target`.
+Run `hermes hooks` once to trust the hook, unless you've set `hooks_auto_accept: true`.
 
-### Cursor CLI / Cursor Agent
+**Cursor**
 
-If you've already installed Claude Code hooks, Cursor can load that same `.claude/settings.json`
-directly: enable *Settings → Rules, Skills, Subagents → Include third-party Plugins, Skills, and
-other configs*. Otherwise:
+If you've installed the Claude Code hooks, Cursor can reuse them: turn on *Settings > Rules,
+Skills, Subagents > Include third-party Plugins, Skills, and other configs*. Otherwise:
 
 ```bash
-cordon install-hooks --target path/to/task-repo --agent cursor --write
+cordon install-hooks --target path/to/repo --agent cursor --write
 ```
 
-### Gemini CLI
+**Gemini CLI**
 
 ```bash
-cordon install-hooks --target path/to/task-repo --agent gemini --write
+cordon install-hooks --target path/to/repo --agent gemini --write
 ```
 
-Hooks are on by default from v0.26.0 onward. Google has said Gemini CLI is being superseded by
-Antigravity CLI for unpaid-tier and Google One users, so confirm which one you're running.
+Hooks are on by default from v0.26.0. Google is moving some users from Gemini CLI to Antigravity
+CLI, so check which one you actually have.
 
-### Aider (and anything else without a hook system)
-
-Aider has no `PreToolUse`/`PostToolUse`-shaped hook system, so `cordon wrap` spawns the agent
-itself as a direct child and samples that PID for the whole run, giving one session-level
-peak/average record instead of a per-tool-call breakdown:
+**Aider, or anything without hooks**
 
 ```bash
 cordon wrap -- aider --message "fix the failing test"
 ```
 
-`cordon reduce` reports `n_toolcalls: 0` on a wrapped run; that's expected. `cordon analyze`'s
-per-tool and retry-loop passes need paired markers, so treat wrap-only data as session-level only.
+Cordon starts the agent itself and samples it for the whole run. You get one session-level
+record instead of a per-call breakdown, and `reduce` will say `n_toolcalls: 0`. That's expected.
 
-## Measure
+On Linux and macOS, `--scope user` single-quotes the hook command for `sh -c`, so install paths
+with spaces or a `$` in them work.
 
-Run the agent normally with hooks installed. Cordon writes a marker log and sample stream per
-session under `runs/<session-id>/`, and when the agent ends a session (or a turn — Claude Code's
-`Stop`) a detached `cordon finalize` reduces it and writes `runs/<session-id>/report.md`. Nothing
-to run by hand:
+## How it works
+
+Each agent fires an event before and after every tool call. Cordon's hook writes a timestamped
+marker and exits. It never measures anything itself: spawning a process inside the hook would land
+right in the window being measured. Instead, the first hook of a session starts one background
+sampler.
+
+The sampler walks up from the hook to find the agent. It scores the ancestors, so
+`node .../@anthropic-ai/claude-code/cli.js` beats a random `node` MCP server sitting in between.
+It never climbs as far as init or launchd. If the guess is wrong, `CORDON_AGENT_PID` overrides it.
+Every 250 ms it reads memory and CPU for the agent's whole process tree, plus per-process numbers
+for anything born during the session. The interval is short because the bursts worth catching
+last a second or two. Between calls is data too: the agent's resting memory and the split
+between thinking time and tool time both come from sampling between calls.
+
+Memory gets measured three ways. There's RSS summed over the tree. There's a "unique" figure that
+doesn't double-count shared pages, refreshed once a second: PSS from `/proc/<pid>/smaps_rollup` on
+Linux, unique set size on macOS, private bytes on Windows. And on Linux, when the agent already
+has a cgroup to itself, the kernel's own `memory.current`.
+
+When a session ends (or a turn ends, for Claude Code's `Stop`), a detached `cordon finalize`
+pairs the markers into calls, slices the samples per call, and writes `report.md`. The sampler
+stops on session end, when the agent exits, or after `CORDON_IDLE_STOP_S` (default 1800) seconds
+with no new markers, so a crashed agent doesn't leave one running forever.
+
+A few decisions worth knowing about:
+
+- Pairing uses the agent's tool-call ID when there is one. When there isn't, it falls back to
+  session + tool + input, matched last-in-first-out. Two identical concurrent calls get counted
+  as unpaired rather than guessed at.
+- Baseline memory is the 10th percentile of the session's samples. A median would let a session
+  full of heavy calls drag its own baseline up.
+- A retry loop is three or more identical calls in a row, which is the paper's definition. It
+  misses `pytest`, Edit, `pytest`, Edit. `retry_profile(ignore_tools=...)` relaxes it.
+- When two calls overlap, a new process goes to whichever started most recently, and both calls
+  get marked *shared* in the report.
+
+Every hook exits 0 no matter what goes wrong inside it. Failures go to `runs/<id>/cordon.log`,
+`sampler.stderr` or `finalize.stderr`. A broken measurement must never break the agent.
+
+The cost: one sampler tick took a median 6.82 ms against a live 10-11 process Claude Code tree on
+my machine, about 2.7% of one core. Each hook call adds about 0.2 s to its tool call on Windows,
+which is mostly Python starting up. Measure it yourself before trusting a big batch, and set
+`CORDON_DISABLE=1` when you're not looking at the data.
+
+## The lower-level commands
 
 ```bash
-cordon report --last          # newest session's report
-cordon report --session <id>  # a specific one
-cordon report --all           # one report across every session
-cordon status                 # every run: duration, tool calls, peak MB, report?, sampler live?
-cordon status --clean         # stop samplers whose agent is gone or idle
+cordon report --session <id>     # a specific session
+cordon report --all              # one report across every session
+cordon reduce --run-dir runs/<id>
+cordon analyze --runs runs --out findings.md   # --json for raw numbers
+cordon control contend --out contention.md     # guarded vs unguarded under CPU contention
 ```
-
-The lower-level steps are still there for batch work:
-
-```bash
-cordon reduce --run-dir runs/<session-id>
-cordon analyze --runs runs --out docs/stage1-findings.md   # --json for raw numbers
-```
-
-A sampler stops on session end, when the agent process exits, or after
-`CORDON_IDLE_STOP_S` seconds (default 1800) with no new markers — so a crashed agent that never
-sent `SessionEnd` doesn't leave one running. Per-run `cordon.log`, `sampler.stderr` and
-`finalize.stderr` hold anything that went wrong.
-
-## Control
-
-```bash
-cordon control probe
-cordon control run --hint memory:high -- pytest tests/
-cordon control contend --out docs/stage2-contention.md
-```
-
-`probe` reports what the machine can enforce. `run` guards one command with the strongest
-backend available (table at the top) and passes its exit code through unchanged; with no backend
-it still runs the command, just unguarded. On a systemd distro where cgroup v2 isn't delegated to
-your user, `systemctl --user` usually is, and `run` uses a transient `systemd-run --user --scope`
-for you. `contend` measures what enforcement is worth under synthetic CPU
-contention, the same unguarded-vs-guarded shape as the source paper's own evaluation.
 
 ## Layout
 
 ```
-assets/              logo, banner, social preview — see docs/design-language.md
-features/wrapper/   sampler, hook entrypoint, reducer, JSON-lines schema, agent registry, wrap
-features/analysis/  characterization passes over reduced tool-call records
-features/control/   capability probe, intent protocol, cgroup/systemd-run/advisory backends, guarded runner
-features/host.py     the one place Linux, macOS and Windows differ (paths, quoting, detaching, data dirs)
-scripts/             e2e_control.py, the real-OS enforcement check CI runs on Linux and macOS
-docs/                design notes and findings
-tests/                pytest suite
+assets/             logo, banner, social preview (see docs/design-language.md)
+features/host.py    the one place Linux, macOS and Windows differ: paths, quoting, detaching, data dirs
+features/wrapper/   hooks, sampler, reducer, finalize/report/status, doctor, agent registry, wrap
+features/analysis/  the analysis passes and the report
+features/control/   probe, hints, cgroup / systemd-run / advisory backends, guarded runner
+scripts/            e2e_control.py, the real-kernel limit check CI runs on Linux and macOS
+docs/               design notes and findings
+tests/              pytest suite
 ```
 
 ## License
