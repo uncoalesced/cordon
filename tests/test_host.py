@@ -30,6 +30,23 @@ def test_venv_script_default_is_this_interpreters_scripts_dir():
     assert host.venv_script("cordon").parent == Path(sysconfig.get_path("scripts"))
 
 
+def test_darwin_footprint_is_none_off_macos():
+    if host.OS != host.DARWIN:
+        assert host.darwin_footprint(1) is None
+
+
+@pytest.mark.skipif(host.OS != host.DARWIN, reason="proc_pid_rusage is macOS-only")
+def test_darwin_footprint_reads_a_live_process_fast():
+    import os
+    import time
+
+    started = time.perf_counter()
+    footprint = host.darwin_footprint(os.getpid())
+    assert footprint is not None and footprint > 1 << 20  # a Python process is well over 1 MB
+    assert time.perf_counter() - started < 0.5
+    assert host.darwin_footprint(2**31 - 1) is None  # no such process
+
+
 def test_shell_quote_survives_posix_metacharacters():
     assert host.shell_quote("/home/a b/$x`y`/cordon", os_name="posix") == "'/home/a b/$x`y`/cordon'"
     assert host.shell_quote(r"C:\a b\cordon.exe", os_name="nt") == r'"C:\a b\cordon.exe"'

@@ -218,7 +218,7 @@ def parse_pss_kb(text: str) -> int | None:
 
 
 def unique_bytes(proc: Any, os_kind: str = host.OS, proc_root: str = "/proc") -> int:
-    """Memory this process does not share: PSS on Linux, USS on macOS, private bytes on Windows."""
+    """Memory this process does not share: PSS on Linux, phys_footprint on macOS, private bytes on Windows."""
     if os_kind == host.LINUX:
         # smaps_rollup is one small read (kernel 4.14+); memory_full_info() parses full smaps.
         try:
@@ -228,12 +228,11 @@ def unique_bytes(proc: Any, os_kind: str = host.OS, proc_root: str = "/proc") ->
         if pss is not None:
             return pss * 1024
     elif os_kind == host.DARWIN:
-        import psutil
-
-        try:
-            return proc.memory_full_info().uss
-        except psutil.AccessDenied:
-            pass  # other-user/hardened processes: rss, so one denied pid cannot freeze the sum
+        # Never memory_full_info() here: its USS walk takes minutes on a large node process.
+        footprint = host.darwin_footprint(proc.pid)
+        if footprint is not None:
+            return footprint
+        # Denied (other-user/hardened process): fall through to rss so the sum stays complete.
     info = proc.memory_info()
     return getattr(info, "private", info.rss)
 

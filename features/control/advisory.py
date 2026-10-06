@@ -54,7 +54,7 @@ def _linux_pss(pid: int, proc_root: Path = Path("/proc")) -> int | None:
 
 
 def tree_memory_bytes(pid: int, os_kind: str | None = None) -> int | None:
-    """Memory of pid and its descendants: PSS on Linux, USS on macOS, RSS where those fail.
+    """Memory of pid and its descendants: PSS on Linux, phys_footprint on macOS, RSS where those fail.
 
     None means the root process is gone (or nothing can be measured), not zero usage.
     """
@@ -75,10 +75,7 @@ def tree_memory_bytes(pid: int, os_kind: str | None = None) -> int | None:
     for proc in procs:
         size = _linux_pss(proc.pid) if os_kind == host.LINUX else None
         if size is None and os_kind == host.DARWIN:
-            try:
-                size = int(proc.memory_full_info().uss)
-            except (psutil.Error, AttributeError, OSError):
-                size = None
+            size = host.darwin_footprint(proc.pid)  # not memory_full_info(): minutes on big trees
         if size is None:
             try:
                 size = int(proc.memory_info().rss)

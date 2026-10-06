@@ -209,26 +209,24 @@ def test_parse_pss_reads_smaps_rollup():
     assert sampler_module.parse_pss_kb("Pss: lots kB\n") is None
 
 
-def test_unique_bytes_per_os(tmp_path: Path):
+def test_unique_bytes_per_os(tmp_path: Path, monkeypatch):
     from types import SimpleNamespace
+
+    from features import host
 
     (tmp_path / "7").mkdir()
     (tmp_path / "7" / "smaps_rollup").write_text("Pss: 10 kB\n")
-    proc = SimpleNamespace(
-        pid=7,
-        memory_info=lambda: SimpleNamespace(rss=999),
-        memory_full_info=lambda: SimpleNamespace(uss=55),
-    )
+
+    def never():  # macOS must not use the minutes-long USS walk
+        raise AssertionError("memory_full_info called")
+
+    proc = SimpleNamespace(pid=7, memory_info=lambda: SimpleNamespace(rss=999), memory_full_info=never)
     assert sampler_module.unique_bytes(proc, "linux", str(tmp_path)) == 10 * 1024
     proc.pid = 8  # no smaps_rollup: falls back to rss
     assert sampler_module.unique_bytes(proc, "linux", str(tmp_path)) == 999
+    monkeypatch.setattr(host, "darwin_footprint", lambda pid: 55)
     assert sampler_module.unique_bytes(proc, "darwin") == 55
-    import psutil
-
-    def denied():
-        raise psutil.AccessDenied(7)
-
-    proc.memory_full_info = denied
+    monkeypatch.setattr(host, "darwin_footprint", lambda pid: None)  # denied / unavailable
     assert sampler_module.unique_bytes(proc, "darwin") == 999
     assert sampler_module.unique_bytes(proc, "windows") == 999
     proc.memory_info = lambda: SimpleNamespace(rss=999, private=321)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shlex
 import subprocess
@@ -75,6 +76,54 @@ def detach_kwargs(stderr: IO[Any] | int | None = None, os_name: str | None = Non
         # Ctrl-C in it (SIGINT to the foreground group) never reaches the sampler.
         kwargs["start_new_session"] = True
     return kwargs
+
+
+class _RusageInfoV0(ctypes.Structure):
+    # <libproc.h> struct rusage_info_v0; only ri_phys_footprint is read.
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+    ]
+
+
+_RUSAGE_INFO_V0 = 0
+_proc_pid_rusage: Any = None
+
+
+def darwin_footprint(pid: int) -> int | None:
+    """macOS phys_footprint of one process, in bytes: what Activity Monitor calls "Memory".
+
+    One proc_pid_rusage() syscall. psutil's memory_full_info().uss walks every VM region instead
+    and takes minutes on a multi-GB node process, which froze the sampler. None when the call is
+    unavailable or denied (other user's or hardened process).
+    """
+    global _proc_pid_rusage
+    if OS != DARWIN:
+        return None
+    if _proc_pid_rusage is None:
+        try:
+            lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            fn = lib.proc_pid_rusage
+            fn.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(_RusageInfoV0)]
+            fn.restype = ctypes.c_int
+            _proc_pid_rusage = fn
+        except (OSError, AttributeError):
+            _proc_pid_rusage = False
+    if not _proc_pid_rusage:
+        return None
+    info = _RusageInfoV0()
+    if _proc_pid_rusage(int(pid), _RUSAGE_INFO_V0, ctypes.byref(info)) != 0:
+        return None
+    return int(info.ri_phys_footprint)
 
 
 def user_data_dir(app: str = "cordon", env: dict[str, str] | None = None, os_kind: str | None = None) -> Path:
