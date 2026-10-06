@@ -197,3 +197,63 @@ def test_a_real_child_is_measured_end_to_end():
     result = run_guarded(argv, backend=RecordingBackend(), env={}, interval=0.05)
     assert result.returncode == 0
     assert result.duration_s >= 0.3
+
+
+def test_an_attach_error_report_from_the_child_is_decoded():
+    import errno
+    import os
+
+    from features.control.guard import _read_attach_report
+    from features.wrapper.logging_setup import get_logger
+
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"E%d" % errno.EACCES)
+    os.close(write_fd)
+    reason = _read_attach_report(read_fd, get_logger("test"), "tool_1_2")
+    assert reason.startswith(f"join failed: errno {errno.EACCES}")
+
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    assert _read_attach_report(read_fd, get_logger("test"), "tool_1_2") == ""
+
+
+class WrappingBackend(RecordingBackend):
+    name = "wrapping"
+
+    def __init__(self, stats: CgroupStats) -> None:
+        super().__init__(stats)
+        self.bound: list[int] = []
+
+    def wrap_argv(self, handle, argv):
+        return [sys.executable, "-c", "import sys; sys.stderr.write('wrapped\\n')"]
+
+    def bind_pid(self, handle, pid):
+        self.bound.append(pid)
+
+
+def test_the_backend_can_wrap_argv_and_learns_the_child_pid(capsys):
+    backend = WrappingBackend(CgroupStats(observable=True))
+    result = run_guarded(_echo("never runs"), backend=backend, env={}, interval=0.01)
+    assert result.returncode == 0
+    assert result.argv == _echo("never runs")  # the record keeps what the agent asked for
+    assert "wrapped" in capsys.readouterr().err
+    assert len(backend.bound) == 1 and backend.bound[0] > 0
+
+
+def test_watchdog_stats_produce_advisory_worded_feedback(capsys):
+    stats = CgroupStats(peak_memory_mb=300.0, memory_stall_s=1.0, high_events=1, observable=True, stall_source="watchdog")
+    result = run_guarded(_echo("hi"), hint="memory:100M", backend=RecordingBackend(stats), env={}, interval=0.01)
+    assert "over its memory limit" in result.feedback
+    assert result.stats["stall_source"] == "watchdog"
+    assert result.stats["attach_error"] == ""
+
+
+def test_a_setup_failure_after_create_does_not_leak_the_cgroup():
+    class ApplyFails(RecordingBackend):
+        def apply(self, handle, intent):
+            raise OSError("memory.high write refused")
+
+    backend = ApplyFails()
+    result = run_guarded(_echo("hi"), backend=backend, env={}, interval=0.01)
+    assert result.returncode == 0 and result.attached is False
+    assert backend.destroyed == backend.created

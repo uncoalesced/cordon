@@ -5,14 +5,19 @@ from __future__ import annotations
 import errno
 import os
 import platform
+import shutil
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from features import host
 from features.wrapper.logging_setup import get_logger, log_failure
 
 CGROUP2_ROOT = Path("/sys/fs/cgroup")
+PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+TASKPOLICY = "/usr/sbin/taskpolicy"
 SCHED_EXT_DIR = Path("/sys/kernel/sched_ext")
 BTF_VMLINUX = Path("/sys/kernel/btf/vmlinux")
 PSI_MEMORY = Path("/proc/pressure/memory")
@@ -183,6 +188,131 @@ def probe_cgroup2_writable(root: Path = CGROUP2_ROOT) -> Capability:
     return Capability("cgroup2_writable", True, f"can create and remove children under {root}")
 
 
+def own_cgroup(proc_self_cgroup: Path = PROC_SELF_CGROUP) -> str | None:
+    """The unified-hierarchy path from a /proc/<pid>/cgroup file (the `0::/path` line), or None."""
+    try:
+        text = Path(proc_self_cgroup).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("0::"):
+            return line[3:].strip() or "/"
+    return None
+
+
+def _controllers(path: Path) -> set[str]:
+    try:
+        return {c.lstrip("+") for c in _read(path).split()}
+    except OSError:
+        return set()
+
+
+def _has_procs(directory: Path) -> bool:
+    try:
+        return bool(_read(directory / "cgroup.procs"))
+    except OSError:
+        return True  # unreadable: assume populated, so we never try to enable controllers on it
+
+
+def find_delegated_base(
+    mount: Path = CGROUP2_ROOT,
+    proc_self_cgroup: Path = PROC_SELF_CGROUP,
+    access: Callable[[Any, int], bool] = os.access,
+) -> tuple[Path, tuple[str, ...]] | None:
+    """Nearest ancestor of our own cgroup that we may build a cordon/ subtree under.
+
+    cgroup v2 rules that decide this:
+    - We need write access to the node, its subtree_control and its cgroup.procs. cgroup.procs is
+      the common ancestor of our cgroup and any child of the node, and the kernel checks write
+      access there when a process migrates (so an SSH session scope under root-owned user-UID.slice
+      is correctly rejected; a terminal inside user@UID.service passes).
+    - No internal processes: a non-root cgroup with processes in it cannot enable controllers in
+      its subtree_control. Such a node only offers what its subtree_control already enables; an
+      empty one offers whatever is in its cgroup.controllers, since we can enable those.
+    The node offering the most of cpu/memory wins, nearest first. The mount root itself is not a
+    delegated base; it is the separate root backend.
+    """
+    mount = Path(mount)
+    rel = own_cgroup(proc_self_cgroup)
+    if rel is None:
+        return None
+    node = mount / rel.strip("/") if rel.strip("/") else mount
+    best: tuple[Path, tuple[str, ...]] | None = None
+    while node != mount and mount in node.parents:
+        writable = (
+            access(node, os.W_OK | os.X_OK)
+            and access(node / "cgroup.subtree_control", os.W_OK)
+            and access(node / "cgroup.procs", os.W_OK)
+        )
+        if writable:
+            offered = _controllers(node / "cgroup.subtree_control")
+            if not _has_procs(node):
+                offered |= _controllers(node / "cgroup.controllers")
+            usable = tuple(c for c in REQUIRED_CONTROLLERS if c in offered)
+            if usable and (best is None or len(usable) > len(best[1])):
+                best = (node, usable)
+        node = node.parent
+    return best
+
+
+def probe_cgroup2_delegated(
+    mount: Path = CGROUP2_ROOT, proc_self_cgroup: Path = PROC_SELF_CGROUP
+) -> Capability:
+    found = find_delegated_base(mount, proc_self_cgroup)
+    if found is None:
+        rel = own_cgroup(proc_self_cgroup)
+        where = f"own cgroup {rel}" if rel else f"no cgroup v2 entry in {proc_self_cgroup}"
+        return Capability("cgroup2_delegated", False, f"no writable delegated ancestor ({where})")
+    base, controllers = found
+    candidate = base / f"cordon_probe_{os.getpid()}"
+    try:
+        candidate.mkdir()
+        candidate.rmdir()
+    except OSError as exc:
+        return Capability("cgroup2_delegated", False, f"{base} looks delegated but mkdir failed: {exc.strerror or exc}")
+    return Capability("cgroup2_delegated", True, f"path={base} controllers={' '.join(controllers)}")
+
+
+def systemd_run_user_works(
+    binary: str = "systemd-run",
+    runner: Callable[..., Any] = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+) -> tuple[bool, str]:
+    """Run a throwaway transient user scope. Presence of the binary proves nothing; this does."""
+    path = which(binary)
+    if path is None:
+        return False, f"{binary} not on PATH"
+    cmd = [path, "--user", "--scope", "--quiet", "--collect", "-p", "MemoryHigh=infinity", "--", sys.executable, "-c", ""]
+    try:
+        done = runner(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"{binary} --user failed to run: {exc}"
+    if done.returncode != 0:
+        err = (done.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()
+        return False, f"{binary} --user --scope exited {done.returncode}: {err[-1] if err else 'no message'}"
+    return True, f"{path} can start transient user scopes"
+
+
+def probe_systemd_run_user() -> Capability:
+    ok, detail = systemd_run_user_works()
+    return Capability("systemd_run_user", ok, detail)
+
+
+def probe_advisory(os_kind: str | None = None, which: Callable[[str], str | None] = shutil.which) -> Capability:
+    os_kind = host.OS if os_kind is None else os_kind
+    if os_kind == host.DARWIN:
+        version = platform.mac_ver()[0] or "unknown"
+        taskpolicy = "yes" if Path(TASKPOLICY).exists() else "no"
+        return Capability(
+            "darwin_advisory", True, f"macOS {version}: nice + memory watchdog, taskpolicy={taskpolicy} (soft, no hard limits)"
+        )
+    if os_kind == host.LINUX:
+        return Capability("advisory", True, "nice + PSS memory watchdog fallback (soft, no hard limits)")
+    return Capability(
+        "advisory", False, f"{os_kind}: no enforcement backend (out of scope); commands run unchanged under the null backend"
+    )
+
+
 def probe_psi(path: Path = PSI_MEMORY) -> Capability:
     try:
         _read(Path(path))
@@ -232,6 +362,9 @@ def probe(root: Path = CGROUP2_ROOT) -> list[Capability]:
         probe_capabilities,
         lambda: probe_cgroup2(root),
         lambda: probe_cgroup2_writable(root),
+        lambda: probe_cgroup2_delegated(root),
+        probe_systemd_run_user,
+        probe_advisory,
         probe_psi,
         probe_sched_ext,
         probe_memcg_bpf_ops,
@@ -248,11 +381,15 @@ def probe(root: Path = CGROUP2_ROOT) -> list[Capability]:
 
 def enforcement_tier(capabilities: list[Capability]) -> str:
     by_name = {cap.name: cap.available for cap in capabilities}
-    if not by_name.get("cgroup2") or not by_name.get("cgroup2_writable"):
-        return "none"
-    if by_name.get("sched_ext") and by_name.get("memcg_bpf_ops") and by_name.get("capabilities"):
-        return "bpf"
-    return "cgroup2"
+    # A transient systemd user scope is a cgroup v2 node too, so it counts as cgroup2 enforcement.
+    cgroup = (by_name.get("cgroup2") and by_name.get("cgroup2_writable")) or by_name.get("cgroup2_delegated") or by_name.get("systemd_run_user")
+    if cgroup:
+        if by_name.get("sched_ext") and by_name.get("memcg_bpf_ops") and by_name.get("capabilities"):
+            return "bpf"
+        return "cgroup2"
+    if by_name.get("advisory") or by_name.get("darwin_advisory"):
+        return "advisory"
+    return "none"
 
 
 def render(capabilities: list[Capability]) -> str:
@@ -269,13 +406,19 @@ def render(capabilities: list[Capability]) -> str:
 
 _TIER_NOTES = {
     "none": (
-        "No cgroup v2 available. Cordon will record what it would have enforced and run the\n"
-        "command unchanged. See docs/stage2-design.md for what unblocks real enforcement."
+        "No enforcement backend on this host (Windows is out of scope). Cordon will record what it\n"
+        "would have enforced and run the command unchanged. See docs/stage2-design.md."
+    ),
+    "advisory": (
+        "Advisory only: no usable cgroup v2. CPU share maps to nice (plus taskpolicy -b for low\n"
+        "CPU on macOS) and a user-space watchdog compares the process tree's memory to the limit,\n"
+        "counting over-limit time as stall. Soft: nothing is throttled or killed."
     ),
     "cgroup2": (
-        "cgroup v2 enforcement available: per-call memory.high, cpu.weight, freeze and kill,\n"
-        "with PSI stall accounting. The in-kernel BPF policy layer (sched_ext for CPU,\n"
-        "memcg_bpf_ops for memory) is absent, so throttle decisions stay at kernel default."
+        "cgroup v2 enforcement available (root, delegated subtree, or systemd user scope, in that\n"
+        "order of preference after delegation): per-call memory.high and cpu.weight with PSI stall\n"
+        "accounting. The in-kernel BPF policy layer (sched_ext for CPU, memcg_bpf_ops for memory)\n"
+        "is absent, so throttle decisions stay at kernel default."
     ),
     "bpf": (
         "Full enforcement available: cgroup v2 plus the in-kernel BPF policy layer."
