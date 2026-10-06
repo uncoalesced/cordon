@@ -555,7 +555,8 @@ def run_sampler(
         if marker.exists():
             return True
         now = time.monotonic()
-        if now - last_idle_check[0] >= 5.0:
+        # Every 5 s, but at least four times per idle limit so a short limit is honoured on time.
+        if now - last_idle_check[0] >= min(5.0, max(0.05, idle_limit / 4)):
             last_idle_check[0] = now
             # Catches a SessionEnd that never fired (agent killed, hook disabled mid-run).
             if idle_for(run_dir, started) > idle_limit:

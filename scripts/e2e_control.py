@@ -54,8 +54,16 @@ def check(result: dict, expected: set[str]) -> list[str]:
         problems.append(f"not attached (attach_error={stats.get('attach_error')!r})")
     if stats.get("high_events", 0) <= 0:
         problems.append(f"high_events={stats.get('high_events')} (expected > 0)")
-    if not result.get("feedback"):
-        problems.append(f"no feedback emitted (stall={stats.get('memory_stall_s')} source={stats.get('stall_source')!r})")
+    # The limit biting (high_events) is the enforcement proof. A warning is only owed once the
+    # stall crosses the guard's own threshold; a throttle that barely hurt stays silent by design.
+    from features.control.intent import FeedbackPolicy
+
+    stall = float(stats.get("memory_stall_s") or 0.0)
+    owed = stall >= FeedbackPolicy().threshold_s(float(result.get("duration_s") or 0.0))
+    if owed and not result.get("feedback"):
+        problems.append(f"stall {stall}s crossed the threshold but no feedback was emitted (source={stats.get('stall_source')!r})")
+    if not owed and result.get("feedback") and not stats.get("oom_kills") and not stats.get("froze"):
+        problems.append(f"feedback emitted for a {stall}s stall below the threshold")
     expected_source = "watchdog" if backend == "advisory" else "psi"
     if stats.get("stall_source") != expected_source:
         problems.append(f"stall_source={stats.get('stall_source')!r}, expected {expected_source!r}")
