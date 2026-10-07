@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.1.0 — macOS and Linux
+
+### Reports you actually see
+- Every session ends with `runs/<id>/report.md`, written by a detached `cordon finalize` on SessionEnd/Stop.
+- New commands: `cordon report [--last|--session|--all]`, `cordon status [--clean]`, `cordon doctor`.
+- Per-call attribution: the sampler records processes born during the session (`procs.jsonl`, per-sample `kids`), and `reduce` charges each call only for the processes it started (`own_peak_mb`, `own_avg_cpu_pct`, `own_procs`). Older runs fall back to the rise above the pre-call level (`delta_peak_mb`). Reports open with a *Heaviest tool calls* table.
+
+### Linux
+- Non-root limits: `control run` uses the user's delegated cgroup v2 subtree, then the mount root, then `systemd-run --user --scope`, then an advisory watchdog. Backends are chosen by a real create/remove probe.
+- PSS from `smaps_rollup` and the agent cgroup's `memory.current` alongside RSS.
+- Agent root found by command line (npm-installed Claude Code runs as `node`); never resolves to pid 0/1.
+- CI runs a real-kernel limit test as a user and as root.
+
+### macOS
+- Advisory backend: nice + `taskpolicy -b` for CPU hints, phys_footprint watchdog for memory, reported as `stall_source: watchdog`.
+- Memory via `proc_pid_rusage()` phys_footprint; psutil's USS walk took 15+ minutes on large processes and froze the sampler.
+- User-scope runs live in `~/Library/Application Support/cordon/runs`.
+
+### Everywhere
+- `features/host.py` holds every OS difference (script paths via sysconfig, `sh -c` quoting, detaching, data dirs).
+- `install-hooks --scope user`, `hook --run-root`; `--target` optional; Hermes needs no target.
+- Hook ~359 ms -> ~200 ms on Windows (no heavy imports on the hot path).
+- Fixes: per-run `cordon.log` never written; UTF-8 BOM on stdin; samplers leaking on pid reuse; idle stop for sessions that never send SessionEnd; report misdescribed its baseline (it is the 10th percentile).
+
 ## v1.0.0 — Multi-agent
 
 ### Multi-agent hook support
