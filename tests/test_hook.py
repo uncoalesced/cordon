@@ -16,7 +16,7 @@ from features.wrapper import hook as hook_module
 from features.wrapper.hook import spawn_finalize as real_spawn_finalize
 from features.wrapper.hook import spawn_sampler as real_spawn_sampler
 from features.wrapper.reduce import reduce_run
-from features.wrapper.sampler import stop_file, write_pid_file
+from features.wrapper.sampler import read_pid_file, stop_file, write_pid_file
 from features.wrapper.schema import (
     EVENT_SESSION_END,
     EVENT_SESSION_START,
@@ -245,7 +245,9 @@ def test_spawn_sampler_records_pid_and_clears_stale_stop_file(run_dir: Path, mon
     monkeypatch.setattr(hook_module.subprocess, "Popen", lambda *_a, **_k: SimpleNamespace(pid=4242))
 
     assert real_spawn_sampler(run_dir, agent_pid=os.getpid(), interval=0.25) == 4242
-    assert hook_module.sampler_pid_path(run_dir).read_text(encoding="utf-8") == "4242"
+    # The fake pid may belong to a real process on the runner, in which case its create_time is
+    # appended too; only the pid is this test's business.
+    assert read_pid_file(hook_module.sampler_pid_path(run_dir))[0] == 4242
     assert not stop_file(run_dir).exists()
 
 
