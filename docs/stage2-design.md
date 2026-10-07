@@ -1,5 +1,7 @@
 # Stage 2 — Control Design
 
+> CLAUDE.md §N references below point to the private project brief this was designed against; it is not part of the repository.
+
 Stage 1 measures a tool call. Stage 2 acts on it: each intercepted call runs in its own
 ephemeral cgroup, carrying limits derived from what the agent declared it was about to do, and
 the agent gets told in plain English when those limits bit.
@@ -213,6 +215,41 @@ cannot. The cost is that stderr arrives at once at the end rather than streaming
 outlived its parent — `cgroup.kill` fires first, which handles processes forking mid-kill; only
 then does `rmdir` retry. A cgroup that still cannot be removed is logged as leaked rather than
 silently retried forever.
+
+## Backends per host
+
+`select_backend` takes the first backend that passes a real probe (it creates and removes
+something; seeing a controller listed is not enough):
+
+| Order | Backend | When | Stall figure |
+|---|---|---|---|
+| 1 | `cgroup2`, delegated | non-root; nearest ancestor of `/proc/self/cgroup` we can write (node, `subtree_control`, `cgroup.procs`), usually `user@UID.service` | PSI |
+| 2 | `cgroup2`, root | root, or a writable cgroupfs in a container | PSI |
+| 3 | `systemd-run` | `systemd-run --user --scope` actually starts a throwaway scope | PSI, from the scope found via `/proc/<pid>/cgroup` |
+| 4 | `advisory` | macOS always; Linux with none of the above | watchdog over-limit seconds |
+| 5 | `null` | Windows, or forced | none |
+
+Delegated-subtree rules that shaped the code:
+- **No internal processes.** A non-root cgroup with processes cannot enable controllers, so a
+  populated ancestor only offers what its `subtree_control` already enables. Cordon never writes
+  `subtree_control` on such a node; it builds `cordon/` below the chosen node and enables
+  controllers there.
+- **Migration needs the common ancestor.** Writing a pid into `cordon/tool_*` needs write access
+  to `cgroup.procs` of the common ancestor of source and destination, which is the chosen node.
+  That is why an SSH session scope under a root-owned `user-UID.slice` is rejected (and falls
+  through to systemd-run), while a terminal inside `user@UID.service` passes.
+- **Per-controller degrade.** Old systemd delegates `memory pids` but not `cpu`. Cordon applies
+  what it has and records `"cpu.weight": "skipped: controller not delegated"` in `handle.applied`.
+
+Attachment failures in the child are reported through an inherited pipe as `E<errno>` (no
+logging between fork and exec); the parent sets `stats.attach_error` and `attached: false`.
+
+The advisory backend is soft: `cpu.weight` becomes nice (100 to 0, 50 to 5, 25 to 10; only ever
+raised), `cpu:low` runs under `taskpolicy -b` on macOS, and a watchdog sums the tree's PSS
+(Linux) or USS (macOS) each poll. It never throttles or kills. Each crossing of the limit is a
+`high_event`, and the time spent over the limit is reported as `memory_stall_s` with
+`stall_source: "watchdog"`, so the same `FeedbackPolicy` warns the agent but analysis never
+mixes it with PSI.
 
 ## The contention experiment
 

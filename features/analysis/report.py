@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence
 
-from features.analysis.metrics import DatasetMetrics, RunMetrics, ToolTypeStats
+from features.analysis.metrics import DatasetMetrics, HeavyCall, RunMetrics, ToolTypeStats
 
 PAPER = "AgentCgroup §6"
 
@@ -19,8 +19,19 @@ below come from those slices plus the uncut session stream.
 
 Definitions used here, stated because they are choices rather than givens:
 
-- **Baseline memory** — median of samples falling outside every tool-call window. This is the
-  framework's resting footprint, the layer AgentCgroup §6 measures at ~185MB.
+- **Baseline memory** — the 10th percentile of all samples in the session. This approximates
+  the framework's resting footprint, the layer AgentCgroup §6 measures at ~185MB.
+- **Memory metric** — where the sampler recorded it, per-run memory figures use unique memory
+  (PSS on Linux, USS on macOS, private bytes on Windows), which does not double-count pages
+  shared across the tree. Older runs, and per-call peaks, use summed RSS. The per-run table
+  says which one each row used.
+- **Added memory / CPU (per call)** — samples cover the whole agent process tree, and the agent
+  itself is already large and busy while it works, so a call's raw peak mostly measures the
+  agent. Runs recorded with per-process data charge each call only for the processes born
+  during it (its subtree: the shell, `python train.py`, `rg`...). Tools that run inside the
+  agent (Read, Edit) start nothing and are charged 0 that way. Older runs fall back to how far
+  the tree rose above its median level in the second before the call. Overlapping calls are
+  marked: their attribution is a best guess.
 - **Burst** — a sample exceeding baseline by more than the burst threshold (300MB by default,
   matching the paper's ">300MB" bursts).
 - **Tool time** — the union of tool-call windows, not their sum, so overlapping concurrent
@@ -180,7 +191,7 @@ def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
 
 def _tool_table(stats: Sequence[ToolTypeStats], label: str) -> str:
     return _table(
-        [label, "Calls", "Total time (s)", "Share of time", "Mean duration (s)", "Mean peak (MB)", "Max peak (MB)"],
+        [label, "Calls", "Total time (s)", "Share of time", "Mean duration (s)", "Mean added (MB)", "Max added (MB)", "Mean added CPU", "Max tree peak (MB)"],
         [
             [
                 entry.tool_type,
@@ -188,7 +199,9 @@ def _tool_table(stats: Sequence[ToolTypeStats], label: str) -> str:
                 f"{entry.total_time_s:.1f}",
                 _pct(entry.time_share),
                 f"{entry.mean_duration_s:.2f}",
-                f"{entry.mean_peak_mb:.1f}",
+                f"{entry.mean_delta_peak_mb:.1f}",
+                f"{entry.max_delta_peak_mb:.1f}",
+                f"{entry.mean_delta_cpu_pct:.0f}%",
                 f"{entry.max_peak_mb:.1f}",
             ]
             for entry in stats
@@ -196,17 +209,39 @@ def _tool_table(stats: Sequence[ToolTypeStats], label: str) -> str:
     )
 
 
+def _heavy_table(calls: Sequence[HeavyCall]) -> str:
+    if not calls:
+        return "_No tool call rose above its pre-call level._\n"
+    return _table(
+        ["Added (MB)", "Added CPU", "Measured as", "Duration (s)", "Tool", "Command", "Overlap"],
+        [
+            [
+                f"{call.delta_peak_mb:.0f}",
+                f"{call.delta_cpu_pct:.0f}%",
+                f"own {call.own_procs} proc(s)" if call.attribution == "subtree" else f"rise over {call.pre_call_mb:.0f} MB",
+                f"{call.duration_s:.1f}",
+                call.tool_type,
+                "`" + call.command[:60].replace("|", "\\|").replace("`", "'").replace("\n", " ") + "`",
+                f"shared ({call.concurrent_calls})" if call.concurrent_calls else "",
+            ]
+            for call in calls
+        ],
+    )
+
+
 def _run_table(runs: Sequence[RunMetrics]) -> str:
     return _table(
-        ["Task", "Calls", "Span (s)", "Tool time", "Baseline (MB)", "Peak (MB)", "Peak/avg", "Retry groups", "CPU/mem r"],
+        ["Task", "Calls", "Span (s)", "Tool time", "Metric", "Baseline (MB)", "Peak (MB)", "Peak RSS (MB)", "Peak/avg", "Retry groups", "CPU/mem r"],
         [
             [
                 run.task_id[:24],
                 str(run.execution.n_toolcalls),
                 f"{run.execution.span_s:.1f}",
                 _pct(run.execution.tool_time_fraction),
+                run.memory.metric,
                 f"{run.memory.baseline_mb:.1f}",
                 f"{run.memory.peak_mb:.1f}",
+                f"{run.memory.rss_peak_mb:.1f}",
                 _num(run.memory.task_peak_avg_ratio, "×"),
                 str(run.retries.n_groups),
                 _num(run.cpu_memory_correlation),
@@ -248,13 +283,25 @@ def render_report(dataset: DatasetMetrics, title: str = "Stage 1 — Characteriz
             "",
         ]
 
+    metrics_used = sorted({run.memory.metric for run in dataset.runs})
     sections += [
+        f"Memory metric for per-run figures: {', '.join(metrics_used)} (see Methodology).",
+        "",
         "## Comparison against the paper",
         "",
         _table(
             ["Metric", "Measured", f"{PAPER}", "Verdict"],
             [[row.metric, row.measured, row.paper, row.verdict] for row in comparison_rows(dataset)],
         ),
+        "",
+        "## Heaviest tool calls",
+        "",
+        "Memory each call is charged with: the processes it started (*own N procs*) when the "
+        "sampler recorded them, otherwise its rise above the agent tree's level in the second "
+        "before it began. Calls marked *shared* overlapped another tool call. Tools that only "
+        "wait on the user are left out.",
+        "",
+        _heavy_table(dataset.heaviest_calls),
         "",
         "## Per-tool-type breakdown",
         "",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import subprocess
 import sys
@@ -11,8 +12,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from features.control.cgroup import CgroupStats, call_cgroup_name, select_backend
-from features.control.intent import FeedbackPolicy, Intent, resolve_intent
+from features import host
+from features.control.cgroup import CgroupStats, attach_in_child, call_cgroup_name, select_backend
+from features.control.intent import FeedbackPolicy, resolve_intent
 from features.wrapper.logging_setup import get_logger, log_failure
 from features.wrapper.schema import DEFAULT_INTERVAL_S, append_jsonl
 
@@ -68,14 +70,26 @@ def run_guarded(
     returncode = -1
     error = ""
 
+    attach_error = ""
+    exec_argv = argv
     try:
         handle = backend.create(name)
+        name = handle.name
         backend.apply(handle, intent)
+        wrap = getattr(backend, "wrap_argv", None)
+        exec_argv = list(wrap(handle, argv)) if wrap else argv
     except Exception:
         log_failure(log, "cgroup setup failed, running unguarded", name=name, argv=argv)
+        if handle is not None:
+            try:
+                backend.destroy(handle)  # created but not applied: do not leak an empty cgroup
+            except Exception:
+                log_failure(log, "cgroup teardown after failed setup also failed", cgroup=name)
         handle = None
+        exec_argv = argv
 
     stderr_file = tempfile.TemporaryFile(mode="w+b") if stderr_passthrough else None
+    report_r = report_w = None
 
     try:
         popen_kwargs: dict[str, Any] = {
@@ -83,11 +97,22 @@ def run_guarded(
             "env": env,
             "stderr": stderr_file if stderr_file is not None else None,
         }
-        if handle is not None and os.name == "posix":
-            popen_kwargs["preexec_fn"] = lambda: backend.join_self(handle)
+        if handle is not None and host.OS != host.WINDOWS:
+            # The child cannot log between fork and exec; it reports a failed join as b"E<errno>"
+            # on this pipe instead. preexec_fn runs before close_fds, so the fd is still open.
+            report_r, report_w = os.pipe()
+            popen_kwargs["preexec_fn"] = functools.partial(attach_in_child, backend, handle, report_w)
 
-        proc = subprocess.Popen(argv, **popen_kwargs)
+        try:
+            proc = subprocess.Popen(exec_argv, **popen_kwargs)
+        finally:
+            if report_w is not None:
+                os.close(report_w)
+        if report_r is not None:
+            attach_error = _read_attach_report(report_r, log, name)
     except OSError as exc:
+        if report_r is not None:
+            os.close(report_r)
         error = f"{type(exc).__name__}: {exc}"
         log_failure(log, "guarded command failed to start", argv=argv, cgroup=name)
         if handle is not None:
@@ -109,11 +134,19 @@ def run_guarded(
             error=error,
         )
 
+    if handle is not None:
+        try:
+            bind = getattr(backend, "bind_pid", None)
+            if bind:
+                bind(handle, proc.pid)
+        except Exception:
+            log_failure(log, "backend could not bind the child pid", cgroup=name, pid=proc.pid)
+
     deadline = None if timeout is None else time.monotonic() + timeout
     try:
         while proc.poll() is None:
             if handle is not None:
-                if not attached:
+                if not attached and not attach_error:
                     attached = _confirm(backend, handle, log)
                 stats = _snapshot(backend, handle, stats, log)
             if deadline is not None and time.monotonic() >= deadline:
@@ -129,7 +162,10 @@ def run_guarded(
         error = "interrupted"
 
     if handle is not None:
+        if not attached and not attach_error:
+            attached = _confirm(backend, handle, log)
         stats = _snapshot(backend, handle, stats, log)
+    stats.attach_error = attach_error
 
     end = time.time()
     duration = round(end - start, 4)
@@ -145,6 +181,7 @@ def run_guarded(
             froze=stats.froze,
             oom_kills=stats.oom_kills,
             observable=stats.observable and attached,
+            stall_source=stats.stall_source or "psi",
         ) or ""
     except Exception:
         log_failure(log, "feedback evaluation failed, suppressing message", cgroup=name, argv=argv)
@@ -188,6 +225,25 @@ def run_guarded(
         bool(feedback),
     )
     return result
+
+
+def _read_attach_report(fd: int, log: Any, name: str) -> str:
+    # Popen returns only after exec (or its failure), so the child has written or exited by now.
+    try:
+        data = os.read(fd, 64)
+    except OSError:
+        data = b""
+    finally:
+        os.close(fd)
+    if not data.startswith(b"E"):
+        return ""
+    try:
+        code = int(data[1:] or b"0")
+    except ValueError:
+        code = 0
+    reason = f"join failed: errno {code} ({os.strerror(code)})" if code else "join failed"
+    log.warning("child could not join its cgroup, running unattached | cgroup=%s %s", name, reason)
+    return reason
 
 
 def _confirm(backend: Any, handle: Any, log: Any) -> bool:

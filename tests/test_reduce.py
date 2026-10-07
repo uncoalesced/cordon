@@ -155,3 +155,76 @@ def test_reduce_run_on_empty_dir_returns_zeroes(run_dir: Path):
     assert result.n_toolcalls == 0
     assert result.n_samples == 0
     assert result.to_dict()["tool_time_fraction"] == 0.0
+
+
+def test_call_is_charged_only_for_what_it_adds_above_the_pre_call_level(run_dir: Path):
+    # Agent tree already at 1500 MB; a cheap `sed` adds nothing, a training run adds 1000 MB.
+    _samples(run_dir, [Sample(t=t / 4, mem_mb=1500.0, cpu_pct=20.0) for t in range(0, 8)]
+             + [Sample(t=2.0, mem_mb=1510.0, cpu_pct=25.0), Sample(t=2.25, mem_mb=1505.0, cpu_pct=20.0)]
+             + [Sample(t=t / 4, mem_mb=1500.0, cpu_pct=20.0) for t in range(10, 16)]
+             + [Sample(t=4.0, mem_mb=2500.0, cpu_pct=120.0), Sample(t=4.25, mem_mb=2400.0, cpu_pct=100.0)])
+    _markers(run_dir, [_start(2.0, "a", command="sed -n 1p x"), _end(2.3, "a"),
+                       _start(4.0, "b", command="python train.py"), _end(4.3, "b")])
+    sed, train = reduce_run(run_dir).records
+    assert sed.pre_call_mb == 1500.0 and sed.delta_peak_mb == 10.0
+    assert train.delta_peak_mb == 1000.0
+    assert train.delta_cpu_pct == 90.0  # mean 110 over the window minus 20 before
+    assert sed.concurrent_calls == train.concurrent_calls == 0
+
+
+def test_first_call_with_no_prior_sample_uses_its_own_first_sample(run_dir: Path):
+    _samples(run_dir, [Sample(t=1.0, mem_mb=800.0, cpu_pct=5.0), Sample(t=1.25, mem_mb=900.0, cpu_pct=5.0)])
+    _markers(run_dir, [_start(1.0), _end(1.3)])
+    (record,) = reduce_run(run_dir).records
+    assert record.pre_call_mb == 800.0 and record.delta_peak_mb == 100.0
+
+
+def test_overlapping_calls_are_marked_shared():
+    from features.wrapper.reduce import count_overlaps
+
+    assert count_overlaps([(0.0, 5.0), (1.0, 2.0), (3.0, 4.0), (6.0, 7.0)]) == [2, 1, 1, 0]
+    assert count_overlaps([(0.0, 1.0), (1.0, 2.0)]) == [0, 0]  # touching is not overlapping
+    assert count_overlaps([]) == []
+
+
+def test_heaviest_calls_skip_interactive_tools_and_rank_by_delta(make_call):
+    from features.analysis.metrics import heaviest_calls
+
+    calls = [make_call(command="sed"), make_call(command="train"), make_call(command="plan", tool_type="ExitPlanMode")]
+    calls[0].delta_peak_mb, calls[1].delta_peak_mb, calls[2].delta_peak_mb = 5.0, 900.0, 5000.0
+    assert [c.command for c in heaviest_calls(calls)] == ["train", "sed"]
+
+
+def test_assign_procs_gives_each_process_to_the_call_that_started_it():
+    from features.wrapper.reduce import assign_procs
+
+    windows = [(10.0, 20.0), (12.0, 13.0), (30.0, 31.0)]
+    procs = [{"pid": 1, "created": 10.2}, {"pid": 2, "created": 12.5}, {"pid": 3, "created": 15.0},
+             {"pid": 4, "created": 25.0}, {"pid": 5, "created": 29.8}]
+    owned = assign_procs(windows, procs)
+    assert owned == [{1: 10.2, 3: 15.0}, {2: 12.5}, {5: 29.8}]  # 4 was born between calls
+
+
+def test_subtree_attribution_ignores_the_agents_own_memory(run_dir: Path):
+    # Agent tree sits at 1500 MB and wobbles by 300 MB; the tool's own child peaks at 900 MB.
+    samples = [Sample(t=t, mem_mb=1500.0 + (300.0 if t % 1 else 0.0), cpu_pct=20.0) for t in (1.0, 1.5)]
+    samples += [Sample(t=t, mem_mb=2400.0, cpu_pct=120.0, kids={"77": [m, 100.0], "5": [50.0, 1.0]})
+                for t, m in ((2.0, 600.0), (2.5, 900.0))]
+    samples += [Sample(t=3.0, mem_mb=1800.0, cpu_pct=20.0), Sample(t=3.5, mem_mb=1800.0, cpu_pct=20.0)]
+    _samples(run_dir, samples)
+    with JsonlWriter(run_dir / "procs.jsonl") as writer:
+        writer.write({"pid": 77, "created": 2.0})  # born in the first call
+        writer.write({"pid": 5, "created": 0.1})   # long-lived, predates every call
+    _markers(run_dir, [_start(1.9, "a", command="python train.py"), _end(2.6, "a"),
+                       _start(3.0, "b", tool="Read", command="x.py"), _end(3.4, "b")])
+    train, read = reduce_run(run_dir).records
+    assert train.attribution == read.attribution == "subtree"
+    assert train.own_peak_mb == 900.0 and train.own_procs == 1 and train.own_avg_cpu_pct == 100.0
+    assert read.own_peak_mb == 0.0 and read.own_procs == 0  # in-process tool started nothing
+
+
+def test_runs_without_process_data_keep_delta_attribution(run_dir: Path):
+    _samples(run_dir, [Sample(t=1.0, mem_mb=100.0, cpu_pct=1.0), Sample(t=2.0, mem_mb=300.0, cpu_pct=1.0)])
+    _markers(run_dir, [_start(1.5), _end(2.1)])
+    (record,) = reduce_run(run_dir).records
+    assert record.attribution == "delta" and record.delta_peak_mb == 200.0

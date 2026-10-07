@@ -178,6 +178,7 @@ class FeedbackPolicy:
         froze: bool = False,
         oom_kills: int = 0,
         observable: bool = True,
+        stall_source: str = "psi",
     ) -> str | None:
         if not observable:
             return None
@@ -194,6 +195,7 @@ class FeedbackPolicy:
             froze=froze,
             oom_kills=oom_kills,
             occurrence=occurrence,
+            stall_source=stall_source,
         )
 
 
@@ -205,6 +207,7 @@ def render_feedback(
     froze: bool = False,
     oom_kills: int = 0,
     occurrence: int = 1,
+    stall_source: str = "psi",
 ) -> str:
     limit = intent.memory_high_mb
     limit_text = "no memory limit" if limit is None else f"a memory:{intent.memory_tier} limit of {limit} MB"
@@ -214,7 +217,13 @@ def render_feedback(
         f"[cordon] This tool call was resource-limited. It peaked at {peak_memory_mb:.1f} MB "
         f"against {limit_text}."
     ]
-    if stall_s > 0:
+    if stall_s > 0 and stall_source == "watchdog":
+        # Advisory hosts (macOS, Linux without cgroups) measure time over the limit, not stall.
+        parts.append(
+            f"It spent {stall_s:.2f}s ({share:.0f}% of its {duration_s:.1f}s runtime) over its memory "
+            "limit; this host only advises, so nothing was throttled, but on a cgroup host it would be."
+        )
+    elif stall_s > 0:
         parts.append(
             f"It stalled {stall_s:.2f}s ({share:.0f}% of its {duration_s:.1f}s runtime) waiting on memory."
         )

@@ -257,3 +257,104 @@ def test_probe_runs_on_this_machine_and_renders():
     assert "enforcement tier:" in rendered
     for cap in capabilities:
         assert cap.name in rendered
+
+
+# --- backend capabilities and tiers (D8-D10) ----------------------------------------------------
+
+
+def _caps(**flags: bool) -> list[Capability]:
+    base = {"cgroup2": False, "cgroup2_writable": False, "cgroup2_delegated": False, "systemd_run_user": False,
+            "sched_ext": False, "memcg_bpf_ops": False, "capabilities": False}  # fmt: skip
+    base.update(flags)
+    return [Capability(name, value, "") for name, value in base.items()]
+
+
+@pytest.mark.parametrize(
+    "flags,expected",
+    [
+        ({"cgroup2": True, "cgroup2_writable": True, "advisory": True}, "cgroup2"),  # linux root
+        ({"cgroup2": True, "cgroup2_delegated": True, "advisory": True}, "cgroup2"),  # linux delegated
+        ({"cgroup2": True, "systemd_run_user": True, "advisory": True}, "cgroup2"),  # linux systemd-run
+        ({"cgroup2": True, "advisory": True}, "advisory"),  # linux, nothing writable
+        ({"darwin_advisory": True}, "advisory"),  # macOS
+        ({"advisory": False}, "none"),  # windows
+        ({"cgroup2_delegated": True, "sched_ext": True, "memcg_bpf_ops": True, "capabilities": True}, "bpf"),
+        ({"advisory": True, "sched_ext": True, "memcg_bpf_ops": True, "capabilities": True}, "advisory"),
+    ],
+)
+def test_tier_per_host_shape(flags: dict, expected: str):
+    assert enforcement_tier(_caps(**flags)) == expected
+
+
+@pytest.mark.parametrize("tier", ["none", "advisory", "cgroup2", "bpf"])
+def test_every_tier_has_a_note(tier: str):
+    assert probe_module._TIER_NOTES[tier]
+
+
+def test_own_cgroup_reads_the_unified_line(tmp_path: Path):
+    pc = tmp_path / "cgroup"
+    pc.write_text("1:name=systemd:/x\n0::/user.slice/a.scope\n", encoding="utf-8")
+    assert probe_module.own_cgroup(pc) == "/user.slice/a.scope"
+    assert probe_module.own_cgroup(tmp_path / "absent") is None
+
+
+def test_delegated_probe_reports_path_and_controllers(tmp_path: Path, monkeypatch):
+    mount = tmp_path / "cgroup"
+    svc = mount / "user.slice" / "user@1000.service"
+    scope = svc / "app.slice" / "term.scope"
+    scope.mkdir(parents=True)
+    for node, controllers, procs in ((svc, "cpu memory pids", ""), (svc / "app.slice", "memory", ""), (scope, "memory", "1")):
+        (node / "cgroup.controllers").write_text(controllers, encoding="utf-8")
+        (node / "cgroup.subtree_control").write_text("", encoding="utf-8")
+        (node / "cgroup.procs").write_text(procs, encoding="utf-8")
+    pc = tmp_path / "self_cgroup"
+    pc.write_text("0::/user.slice/user@1000.service/app.slice/term.scope\n", encoding="utf-8")
+    monkeypatch.setattr(probe_module.os, "access", lambda p, m: str(svc) in str(p))
+
+    result = probe_module.probe_cgroup2_delegated(mount, pc)
+    assert result.available is True
+    assert f"path={svc}" in result.detail and "controllers=cpu memory" in result.detail
+    assert [p.name for p in svc.iterdir() if p.name.startswith("cordon_probe")] == []
+
+
+def test_delegated_probe_names_the_cgroup_it_could_not_use(tmp_path: Path):
+    pc = tmp_path / "self_cgroup"
+    pc.write_text("0::/user.slice/user-1000.slice/session-3.scope\n", encoding="utf-8")
+    result = probe_module.probe_cgroup2_delegated(tmp_path / "cgroup", pc)
+    assert result.available is False
+    assert "session-3.scope" in result.detail
+
+
+def test_systemd_run_user_probe_runs_a_scope(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    ok, detail = probe_module.systemd_run_user_works(
+        runner=lambda cmd, **k: NS(returncode=0, stderr=b""), which=lambda b: "/usr/bin/systemd-run"
+    )
+    assert ok and "transient user scopes" in detail
+    ok, detail = probe_module.systemd_run_user_works(
+        runner=lambda cmd, **k: NS(returncode=1, stderr=b"Failed to connect to bus\n"), which=lambda b: "/x"
+    )
+    assert not ok and "Failed to connect to bus" in detail
+
+    def raising(cmd, **k):
+        raise probe_module.subprocess.TimeoutExpired(cmd, 10)
+
+    assert probe_module.systemd_run_user_works(runner=raising, which=lambda b: "/x")[0] is False
+    assert probe_module.systemd_run_user_works(which=lambda b: None) == (False, "systemd-run not on PATH")
+
+
+def test_advisory_capability_per_os(monkeypatch):
+    monkeypatch.setattr(probe_module.platform, "mac_ver", lambda: ("14.5", ("", "", ""), "arm64"))
+    darwin = probe_module.probe_advisory("darwin")
+    assert darwin.name == "darwin_advisory" and darwin.available and "macOS 14.5" in darwin.detail
+    assert "taskpolicy=" in darwin.detail
+    assert probe_module.probe_advisory("linux").available is True
+    windows = probe_module.probe_advisory("windows")
+    assert windows.available is False and "null backend" in windows.detail
+
+
+def test_probe_lists_the_backend_capabilities():
+    names = {cap.name for cap in probe()}
+    assert {"cgroup2_delegated", "systemd_run_user"} <= names
+    assert names & {"advisory", "darwin_advisory"}

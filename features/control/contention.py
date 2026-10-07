@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import subprocess
 import sys
@@ -9,23 +10,16 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from features.control.cgroup import call_cgroup_name, select_backend
+from features import host
+from features.control.cgroup import attach_in_child, call_cgroup_name, select_backend
 from features.control.intent import resolve_intent
 from features.wrapper.logging_setup import get_logger, log_failure
 
 DEFAULT_WORK = 12_000_000
 POLL_S = 0.02
 
-ENV_PROCS = "CORDON_CGROUP_PROCS"
-
 WORKER_SOURCE = (
-    "import os,sys,time\n"
-    f"p=os.environ.get({ENV_PROCS!r})\n"
-    "if p:\n"
-    "    try:\n"
-    "        open(p,'w').write(str(os.getpid()))\n"
-    "    except OSError:\n"
-    "        pass\n"
+    "import sys,time\n"
     "n=int(sys.argv[1]);t=time.perf_counter();x=0\n"
     "while x<n:\n"
     "    x+=1\n"
@@ -80,18 +74,19 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def _spawn(work: int, procs_path: str | None) -> subprocess.Popen:
-    env = dict(os.environ)
-    if procs_path:
-        env[ENV_PROCS] = procs_path
-    else:
-        env.pop(ENV_PROCS, None)
-    return subprocess.Popen(
-        [sys.executable, "-c", WORKER_SOURCE, str(work)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        env=env,
-    )
+def _spawn(work: int, backend: Any = None, handle: Any = None) -> subprocess.Popen:
+    # Same attach path as the guard: the backend may wrap argv (systemd-run, taskpolicy), join
+    # the child before exec (cgroup, nice), and learn its pid afterwards (scope lookup, watchdog).
+    argv = [sys.executable, "-c", WORKER_SOURCE, str(work)]
+    kwargs: dict[str, Any] = {"stdout": subprocess.PIPE, "stderr": subprocess.DEVNULL}
+    if handle is not None:
+        argv = backend.wrap_argv(handle, argv)
+        if host.OS != host.WINDOWS:
+            kwargs["preexec_fn"] = functools.partial(attach_in_child, backend, handle, None)
+    proc = subprocess.Popen(argv, **kwargs)
+    if handle is not None:
+        backend.bind_pid(handle, proc.pid)
+    return proc
 
 
 def _collect(proc: subprocess.Popen, tier: str, cgroup_name: str, fallback_s: float) -> WorkerResult:
@@ -128,18 +123,17 @@ def run_phase(
 
     try:
         for index, tier in enumerate(tiers):
-            procs_path = None
-            cgroup_name = ""
+            handle = None
             if guarded:
                 try:
-                    handle = backend.create(call_cgroup_name(ts=time.time() + index))
-                    backend.apply(handle, resolve_intent(f"cpu:{tier},memory:max"))
+                    handle = backend.create(call_cgroup_name(ts_ns=time.time_ns() + index))
                     handles.append(handle)
-                    cgroup_name = handle.name
-                    procs_path = str(handle.path / "cgroup.procs") if handle.path else None
+                    backend.apply(handle, resolve_intent(f"cpu:{tier},memory:max"))
                 except Exception:
                     log_failure(log, "cgroup setup failed for worker, running it unguarded", tier=tier, index=index)
-            launched.append((_spawn(work, procs_path), tier, cgroup_name))
+                    handle = None
+            proc = _spawn(work, backend, handle)
+            launched.append((proc, tier, handle.name if handle is not None else ""))
 
         while any(proc.poll() is None for proc, _, _ in launched):
             time.sleep(POLL_S)

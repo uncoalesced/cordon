@@ -5,16 +5,20 @@ from __future__ import annotations
 import re
 import statistics
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from features.analysis.dataset import Run
 from features.wrapper.logging_setup import get_logger, log_failure
+from features.wrapper.reduce import union_seconds
 from features.wrapper.schema import Sample, ToolCallRecord
 
 BURST_THRESHOLD_MB = 300.0
 BASELINE_QUANTILE = 0.1
 RETRY_MIN_LENGTH = 3
 RETRY_TOOLS = ("Bash",)
+# Tools whose duration is the human's thinking time, not work the tool did.
+INTERACTIVE_TOOLS = ("AskUserQuestion", "ExitPlanMode", "EnterPlanMode")
+HEAVY_CALL_LIMIT = 15
 
 BASH_CATEGORIES: tuple[tuple[str, str], ...] = (
     ("test", r"\b(pytest|unittest|nosetests|tox|jest|vitest|mocha|go\s+test|cargo\s+test|mvn\s+test|npm\s+(run\s+)?test)\b"),
@@ -43,21 +47,6 @@ def _correlation(xs: Sequence[float], ys: Sequence[float]) -> float | None:
         return None
 
 
-def union_seconds(intervals: Iterable[tuple[float, float]]) -> float:
-    ordered = sorted(intervals)
-    if not ordered:
-        return 0.0
-    total = 0.0
-    cur_start, cur_end = ordered[0]
-    for start, end in ordered[1:]:
-        if start > cur_end:
-            total += cur_end - cur_start
-            cur_start, cur_end = start, end
-        else:
-            cur_end = max(cur_end, end)
-    return total + (cur_end - cur_start)
-
-
 def in_any_window(t: float, windows: Sequence[tuple[float, float]]) -> bool:
     return any(start <= t <= end for start, end in windows)
 
@@ -81,6 +70,9 @@ class ExecutionSplit:
 
 @dataclass
 class MemoryProfile:
+    # "unique" (PSS/USS/private bytes, no shared-page double count) when every sample has it,
+    # else "rss". The rss_* fields are always RSS so old and new runs stay comparable.
+    metric: str = "rss"
     baseline_mb: float = 0.0
     peak_mb: float = 0.0
     avg_mb: float = 0.0
@@ -89,6 +81,8 @@ class MemoryProfile:
     call_peak_avg_ratios: list[float] = field(default_factory=list)
     max_call_peak_avg_ratio: float = 0.0
     max_ratio_command: str = ""
+    rss_peak_mb: float = 0.0
+    rss_avg_mb: float = 0.0
 
 
 @dataclass
@@ -112,6 +106,24 @@ class ToolTypeStats:
     mean_duration_s: float = 0.0
     mean_peak_mb: float = 0.0
     max_peak_mb: float = 0.0
+    # Added on top of the pre-call level: the part of the tree's memory/CPU this tool caused.
+    mean_delta_peak_mb: float = 0.0
+    max_delta_peak_mb: float = 0.0
+    mean_delta_cpu_pct: float = 0.0
+
+
+@dataclass
+class HeavyCall:
+    task_id: str
+    tool_type: str
+    command: str
+    duration_s: float
+    pre_call_mb: float
+    delta_peak_mb: float
+    delta_cpu_pct: float
+    concurrent_calls: int
+    attribution: str = "delta"
+    own_procs: int = 0
 
 
 @dataclass
@@ -164,6 +176,7 @@ class DatasetMetrics:
     correlation_mean: float | None = None
     tool_types: list[ToolTypeStats] = field(default_factory=list)
     bash_categories: list[ToolTypeStats] = field(default_factory=list)
+    heaviest_calls: list[HeavyCall] = field(default_factory=list)
     mean_bursts_in_tools_fraction: float = 0.0
     mean_sample_time_in_tools_fraction: float = 0.0
     max_change_rate_mb_per_s: float = 0.0
@@ -186,18 +199,26 @@ def execution_split(run: Run) -> ExecutionSplit:
     )
 
 
-def baseline_mb(samples: Sequence[Sample], quantile: float = BASELINE_QUANTILE) -> float:
+def baseline_mb(samples: Sequence[Sample], quantile: float = BASELINE_QUANTILE, unique: bool = False) -> float:
     if not samples:
         return 0.0
-    ordered = sorted(s.mem_mb for s in samples)
+    ordered = sorted((s.mem_mb_unique if unique else s.mem_mb) or 0.0 for s in samples)
     return round(ordered[min(int(len(ordered) * quantile), len(ordered) - 1)], 3)
 
 
+def uses_unique(samples: Sequence[Sample]) -> bool:
+    return bool(samples) and all(s.mem_mb_unique is not None for s in samples)
+
+
 def memory_profile(run: Run) -> MemoryProfile:
-    mems = [s.mem_mb for s in run.samples]
-    profile = MemoryProfile(baseline_mb=baseline_mb(run.samples))
+    unique = uses_unique(run.samples)
+    rss = [s.mem_mb for s in run.samples]
+    mems = [s.mem_mb_unique or 0.0 for s in run.samples] if unique else rss
+    profile = MemoryProfile(metric="unique" if unique else "rss", baseline_mb=baseline_mb(run.samples, unique=unique))
 
     if mems:
+        profile.rss_peak_mb = round(max(rss), 3)
+        profile.rss_avg_mb = _mean(rss)
         profile.peak_mb = round(max(mems), 3)
         profile.avg_mb = _mean(mems)
         profile.task_peak_avg_ratio = _ratio(profile.peak_mb, profile.avg_mb)
@@ -259,6 +280,7 @@ def _group_stats(groups: dict[str, list[ToolCallRecord]]) -> list[ToolTypeStats]
     for name, calls in groups.items():
         durations = [call.duration_s for call in calls]
         peaks = [call.peak_memory_mb for call in calls]
+        deltas = [added_mb(call) for call in calls]
         stats.append(
             ToolTypeStats(
                 tool_type=name,
@@ -268,10 +290,48 @@ def _group_stats(groups: dict[str, list[ToolCallRecord]]) -> list[ToolTypeStats]
                 mean_duration_s=_mean(durations),
                 mean_peak_mb=_mean(peaks),
                 max_peak_mb=round(max(peaks), 3) if peaks else 0.0,
+                mean_delta_peak_mb=_mean(deltas),
+                max_delta_peak_mb=round(max(deltas), 3) if deltas else 0.0,
+                mean_delta_cpu_pct=_mean([added_cpu(call) for call in calls]),
             )
         )
     stats.sort(key=lambda s: s.total_time_s, reverse=True)
     return stats
+
+
+def added_mb(call: ToolCallRecord) -> float:
+    """Memory the call itself is charged with: its own processes when the run recorded them,
+    else its rise above the pre-call level of the whole tree."""
+    return call.own_peak_mb if call.attribution == "subtree" else call.delta_peak_mb
+
+
+def added_cpu(call: ToolCallRecord) -> float:
+    return call.own_avg_cpu_pct if call.attribution == "subtree" else call.delta_cpu_pct
+
+
+def heaviest_calls(calls: Sequence[ToolCallRecord], limit: int = HEAVY_CALL_LIMIT) -> list[HeavyCall]:
+    """Calls that added the most memory above their pre-call level. Tools that only wait on the
+    user are skipped: their windows span minutes of unrelated agent activity."""
+    ranked = sorted(
+        (call for call in calls if call.tool_type not in INTERACTIVE_TOOLS and added_mb(call) > 0),
+        key=added_mb,
+        reverse=True,
+    )
+    return [
+        HeavyCall(
+            task_id=call.task_id,
+            tool_type=call.tool_type,
+            command=call.command,
+            duration_s=call.duration_s,
+            pre_call_mb=call.pre_call_mb,
+            delta_peak_mb=added_mb(call),
+            delta_cpu_pct=added_cpu(call),
+            concurrent_calls=call.concurrent_calls,
+            attribution=call.attribution,
+            own_procs=call.own_procs,
+        )
+        for call in ranked[:limit]
+    ]
 
 
 def tool_type_breakdown(calls: Sequence[ToolCallRecord]) -> list[ToolTypeStats]:
@@ -370,6 +430,7 @@ def analyze_dataset(runs: Sequence[Run], burst_threshold_mb: float = BURST_THRES
         runs=per_run,
         tool_types=tool_type_breakdown(all_calls),
         bash_categories=bash_category_breakdown(all_calls),
+        heaviest_calls=heaviest_calls(all_calls),
         degraded_runs=sum(1 for m in per_run if m.degraded),
     )
 

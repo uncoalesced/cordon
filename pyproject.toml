@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cordon"
-version = "1.0.0"
+version = "1.1.0"
 description = "Tool-call-granularity resource characterization and control for AI coding agents"
 requires-python = ">=3.11"
 dependencies = ["psutil>=5.9", "pyyaml>=6.0"]
@@ -23,6 +23,8 @@ packages = ["features", "features.wrapper", "features.analysis", "features.contr
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=features --cov-report=term-missing"
+# A test stuck for 2 minutes dumps every thread's traceback instead of silently eating the CI job.
+faulthandler_timeout = 120
 markers = ["integration: exercises a full sampler or hook cycle against real processes"]
 
 [tool.coverage.run]

@@ -1,5 +1,7 @@
 # Stage 2 host audit — the two remaining Debian devices
 
+> CLAUDE.md §N references below point to the private project brief this was designed against; it is not part of the repository.
+
 Audited 2026-08-15, following `docs/stage2-hc8-audit.md`. Two devices were offered as the Linux
 host for Stage 2's kernel-level enforcement.
 

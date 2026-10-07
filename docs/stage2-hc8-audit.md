@@ -1,5 +1,7 @@
 # HC8 — Stage 2 feasibility audit
 
+> CLAUDE.md §N references below point to the private project brief this was designed against; it is not part of the repository.
+
 Audited 2026-08-14 over SSH (`u0_a153@100.97.181.3:8022`). HC8 was proposed as the Linux host
 for Stage 2's kernel-level enforcement, since the Windows development machine cannot provide one.
 
