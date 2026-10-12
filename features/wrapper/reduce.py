@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 from features.wrapper.logging_setup import get_logger, log_failure
 from features.wrapper.schema import (
+    is_cordon_cmd,
     EVENT_TOOL_END,
     EVENT_TOOL_START,
     MARKERS_FILENAME,
@@ -27,6 +28,8 @@ from features.wrapper.schema import (
 SUMMARY_FILENAME = "summary.json"
 PRE_CALL_WINDOW_S = 1.0
 BIRTH_SLACK_S = 0.5
+# Clock skew between the hook's time.time() and the OS's process start time.
+START_SLACK_S = 0.05
 
 
 @dataclass
@@ -117,32 +120,78 @@ def load_procs(run_dir: Path) -> list[dict[str, Any]]:
     procs = []
     for raw in read_jsonl(Path(run_dir) / PROCS_FILENAME, quiet=True):
         try:
-            procs.append({"pid": int(raw["pid"]), "created": float(raw["created"])})
+            procs.append({
+                "pid": int(raw["pid"]),
+                "ppid": int(raw.get("ppid", -1)),
+                "created": float(raw["created"]),
+                "cmd": str(raw.get("cmd", "")),
+            })
         except (KeyError, TypeError, ValueError):
             continue
+    procs.sort(key=lambda p: p["created"])
     return procs
 
 
-def assign_procs(windows: list[tuple[float, float]], procs: list[dict[str, Any]], slack_s: float = BIRTH_SLACK_S) -> list[dict[int, float]]:
-    """For each call window, {pid: created} of the processes that call started.
+def top_levels(procs: list[dict[str, Any]]) -> list[int]:
+    """Index of each process's outermost recorded ancestor (procs sorted by birth).
 
-    A process belongs to the latest call that had started by its birth and not yet ended; with
-    overlapping calls that is a guess, which concurrent_calls already flags. slack_s absorbs clock
-    skew between the hook's timestamp and the OS process start time.
+    The parent is the latest-born recorded process with the ppid that was born before the child,
+    so a recycled pid never adopts processes that are not its own.
+    """
+    by_pid: dict[int, list[int]] = {}
+    top: list[int] = []
+    for i, proc in enumerate(procs):
+        candidates = by_pid.get(proc.get("ppid", -1), [])
+        parent = next((j for j in reversed(candidates) if procs[j]["created"] <= proc["created"]), None)
+        top.append(i if parent is None else top[parent])
+        by_pid.setdefault(proc["pid"], []).append(i)
+    return top
+
+
+def close_at_post_hook(windows: list[tuple[float, float]], procs: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    """End each window at the first Cordon hook process born after the call started.
+
+    That process is our own post hook, spawned the instant the tool finished, alongside every
+    other post hook. Runs recorded before tool_end markers carried spawn_ts rely on this alone;
+    newer ones keep whichever bound is earlier.
+    """
+    tops = top_levels(procs)
+    births = sorted({procs[t]["created"] for t in set(tops) if is_cordon_cmd(procs[t].get("cmd", ""))})
+    closed = []
+    for start, upper in windows:
+        i = bisect.bisect_right(births, start)
+        closed.append((start, min(upper, births[i]) if i < len(births) and births[i] <= upper else upper))
+    return closed
+
+
+def assign_procs(
+    windows: list[tuple[float, float]], procs: list[dict[str, Any]], slack_s: float = START_SLACK_S
+) -> list[dict[int, float]]:
+    """For each call window (tool start, post-hook spawn), {pid: created} of the processes it started.
+
+    The agent spawns its pre-hooks before the tool and its post-hooks the moment the tool ends,
+    all as top-level children. So a call owns exactly the process trees whose top-level process
+    was born inside its window; hook trees (and everything a hook spawns in the background) fall
+    outside it, and Cordon's own trees are skipped by command. With overlapping calls a tree goes
+    to the latest call that had started, which concurrent_calls already flags as a guess.
     """
     owned: list[dict[int, float]] = [{} for _ in windows]
     starts = sorted(range(len(windows)), key=lambda i: windows[i][0])
-    for proc in procs:
-        born = proc["created"]
+    tops = top_levels(procs)
+    for proc, top_index in zip(procs, tops):
+        top = procs[top_index]
+        if is_cordon_cmd(top.get("cmd", "")):
+            continue
+        born = top["created"]
         owner = None
         for i in starts:
-            start, end = windows[i]
+            start, upper = windows[i]
             if start - slack_s > born:
                 break
-            if born <= end + slack_s:
+            if born < upper:
                 owner = i
         if owner is not None:
-            owned[owner][proc["pid"]] = born
+            owned[owner][proc["pid"]] = proc["created"]
     return owned
 
 
@@ -219,6 +268,7 @@ def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) ->
     )
 
     intervals: list[tuple[float, float]] = []
+    tool_windows: list[tuple[float, float]] = []
 
     for start, end in pairs:
         try:
@@ -241,7 +291,8 @@ def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) ->
                 peak_memory_mb=round(max(mems), 3) if mems else 0.0,
                 avg_memory_mb=round(sum(mems) / len(mems), 3) if mems else 0.0,
                 avg_cpu_pct=round(sum(cpus) / len(cpus), 2) if cpus else 0.0,
-                samples=[s.to_dict() for s in window],
+                # Per-process maps stay in samples.jsonl; copying them into every call bloats this file.
+                samples=[{k: v for k, v in s.to_dict().items() if k != "kids"} for s in window],
                 call_key=start.call_key,
                 duration_s=round(end.ts - start.ts, 4),
                 n_samples=len(window),
@@ -254,6 +305,7 @@ def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) ->
             )
             result.records.append(record)
             intervals.append((start.ts, end.ts))
+            tool_windows.append((start.ts, end.spawn_ts if end.spawn_ts > start.ts else end.ts))
         except Exception:
             log_failure(
                 log,
@@ -270,7 +322,8 @@ def reduce_run(run_dir: Path, task_id: str | None = None, write: bool = True) ->
 
     procs = load_procs(run_dir)
     if procs or any(s.kids for s in samples):
-        for record, own in zip(result.records, assign_procs(intervals, procs)):
+        tool_windows = close_at_post_hook(tool_windows, procs)
+        for record, own in zip(result.records, assign_procs(tool_windows, procs)):
             window = slice_samples(samples, times, record.start_ts, record.end_ts)
             peak, cpu = own_usage(window, own)
             record.own_peak_mb = round(peak, 3)

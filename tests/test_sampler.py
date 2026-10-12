@@ -312,7 +312,7 @@ def test_walk_stops_below_init_and_the_macos_kernel():
     assert resolve_agent_root(start_pid=52, lookup=procs.__getitem__) == 50
 
 
-def test_sampler_records_young_children_but_not_cordons_own(tmp_path):
+def test_sampler_records_young_children_including_cordons_own(tmp_path):
     import subprocess
     import sys
 
@@ -331,11 +331,12 @@ def test_sampler_records_young_children_but_not_cordons_own(tmp_path):
                 time.sleep(0.05)
         # A Windows venv python.exe is a launcher whose child is the real interpreter: the tool's
         # memory can sit in a grandchild, which is exactly why the whole young subtree is kept.
-        assert str(tool.pid) in sample.kids and str(own.pid) not in sample.kids
+        # Cordon's own processes are recorded as well; reduce drops their trees by command.
+        assert str(tool.pid) in sample.kids and str(own.pid) in sample.kids
         assert sum(m for m, _ in sample.kids.values()) > 25
         recorded = list(read_jsonl(tmp_path / "procs.jsonl"))
-        assert tool.pid in {r["pid"] for r in recorded}
-        assert not any("features.wrapper.cli" in r["cmd"] for r in recorded)
+        assert {tool.pid, own.pid} <= {r["pid"] for r in recorded}
+        assert all({"pid", "ppid", "created", "cmd"} <= set(r) for r in recorded)
     finally:
         for proc in (tool, own):
             proc.kill()

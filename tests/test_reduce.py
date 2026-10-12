@@ -200,9 +200,45 @@ def test_assign_procs_gives_each_process_to_the_call_that_started_it():
 
     windows = [(10.0, 20.0), (12.0, 13.0), (30.0, 31.0)]
     procs = [{"pid": 1, "created": 10.2}, {"pid": 2, "created": 12.5}, {"pid": 3, "created": 15.0},
-             {"pid": 4, "created": 25.0}, {"pid": 5, "created": 29.8}]
+             {"pid": 4, "created": 25.0}, {"pid": 5, "created": 30.02}]
     owned = assign_procs(windows, procs)
-    assert owned == [{1: 10.2, 3: 15.0}, {2: 12.5}, {5: 29.8}]  # 4 was born between calls
+    assert owned == [{1: 10.2, 3: 15.0}, {2: 12.5}, {5: 30.02}]  # 4 was born between calls
+
+
+def test_windows_close_at_our_post_hook_when_markers_lack_spawn_ts():
+    from features.wrapper.reduce import close_at_post_hook
+
+    procs = [
+        {"pid": 1, "ppid": 0, "created": 9.9, "cmd": 'bash -c "/v/cordon" hook'},   # our pre hook
+        {"pid": 2, "ppid": 0, "created": 13.0, "cmd": 'bash -c "/v/cordon" hook'},  # our post hook
+        {"pid": 3, "ppid": 2, "created": 13.2, "cmd": "conhost"},                   # its child, not a top
+    ]
+    assert close_at_post_hook([(10.0, 14.0), (20.0, 21.0)], procs) == [(10.0, 13.0), (20.0, 21.0)]
+    assert close_at_post_hook([(10.0, 12.5)], procs) == [(10.0, 12.5)]  # earlier spawn_ts wins
+
+
+def test_assign_procs_keeps_hook_trees_and_cordon_out_of_the_call():
+    from features.wrapper.reduce import assign_procs
+
+    # Tool window: start marker at 10.0, post-hooks spawned at 14.0 (tool finished).
+    windows = [(10.0, 14.0)]
+
+    def p(pid, ppid, created, cmd="x"):
+        return {"pid": pid, "ppid": ppid, "created": created, "cmd": cmd}
+
+    procs = [
+        p(100, 1, 9.8, "bash -c node pre-hook.js"),        # pre-hook, spawned before the start marker
+        p(101, 100, 11.0, "node pre-hook.js"),             # ...still busy inside the window: its tree
+        p(200, 1, 10.6, "powershell -EncodedCommand AAA"),  # the tool itself
+        p(201, 200, 11.5, "python train.py"),              # what the tool ran
+        p(300, 1, 14.0, 'bash -c "C:/v/cordon.exe" hook'),  # our own post hook
+        p(301, 1, 14.0, "bash -c node post-hook.js"),      # someone else's post hook
+        p(400, 1, 12.0, 'bash -c "C:/v/cordon.exe" hook'),  # a cordon hook inside the window
+        p(401, 400, 12.1, "conhost 0x4"),                   # ...and its child
+        p(100, 1, 13.0, "python other.py"),                 # pid 100 recycled: not pre-hook's tree
+    ]
+    (owned,) = assign_procs(windows, procs)
+    assert owned == {200: 10.6, 201: 11.5, 100: 13.0}
 
 
 def test_subtree_attribution_ignores_the_agents_own_memory(run_dir: Path):

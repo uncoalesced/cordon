@@ -78,6 +78,24 @@ def detach_kwargs(stderr: IO[Any] | int | None = None, os_name: str | None = Non
     return kwargs
 
 
+def popen_detached(command: list[str], cwd: str, stderr: IO[Any] | int | None = None) -> subprocess.Popen:
+    """Start a background child that survives the agent exiting.
+
+    On Windows the agent may run hooks inside a job object that kills every member when it
+    closes, which cut finalize off mid-report at session end; break away from it when the job
+    allows that, and fall back to staying in it when it does not.
+    """
+    kwargs = detach_kwargs(stderr)
+    if os.name == "nt":
+        try:
+            return subprocess.Popen(
+                command, cwd=cwd, **{**kwargs, "creationflags": kwargs["creationflags"] | subprocess.CREATE_BREAKAWAY_FROM_JOB}
+            )
+        except OSError:
+            pass  # job forbids breakaway (access denied): stay in it
+    return subprocess.Popen(command, cwd=cwd, **kwargs)
+
+
 class _RusageInfoV0(ctypes.Structure):
     # <libproc.h> struct rusage_info_v0; only ri_phys_footprint is read.
     _fields_ = [
