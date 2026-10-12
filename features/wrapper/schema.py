@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
@@ -75,6 +76,10 @@ class Marker:
     exit_status: str = ""
     hook_overhead_ms: float = 0.0
     agent_pid: int = 0
+    # When the agent spawned this hook (its wrapper shell's start time). On a tool_end marker that
+    # is the moment the tool finished, before Cordon's own startup latency; reduce uses it to keep
+    # post-hook processes out of the call.
+    spawn_ts: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -92,6 +97,7 @@ class Marker:
             exit_status=str(raw.get("exit_status", "")),
             hook_overhead_ms=float(raw.get("hook_overhead_ms", 0.0)),
             agent_pid=int(raw.get("agent_pid", 0)),
+            spawn_ts=float(raw.get("spawn_ts", 0.0)),
         )
 
 
@@ -158,6 +164,14 @@ class ToolCallRecord:
             own_procs=int(raw.get("own_procs", 0)),
             attribution=str(raw.get("attribution", "delta")),
         )
+
+
+_CORDON_CMD = re.compile(r"features\.wrapper\.cli|cordon(?:\.exe)?['\"]?\s+(?:hook|sample|finalize)\b", re.IGNORECASE)
+
+
+def is_cordon_cmd(cmd: str) -> bool:
+    """Cordon's own hook/sampler/finalize, however the agent wrapped it (`bash -c "...cordon.exe" hook`)."""
+    return bool(_CORDON_CMD.search(cmd))
 
 
 def call_key_for(session_id: str, tool_name: str, tool_input: Any, tool_use_id: str = "") -> str:

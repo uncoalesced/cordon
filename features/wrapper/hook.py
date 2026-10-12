@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -82,6 +81,34 @@ def _interval() -> float:
         return DEFAULT_INTERVAL_S
 
 
+_WRAPPERS = {"sh", "bash", "dash", "zsh", "cmd", "powershell", "pwsh", "cordon"}
+
+
+def _spawn_ts() -> float:
+    """When the agent spawned this hook: the earliest start among our wrapper ancestors.
+
+    The agent runs hooks as `<shell> -c <command>`, and on Windows the venv's cordon.exe is a
+    launcher in front of python, so this process starts well after the agent's spawn.
+    """
+    import psutil
+
+    from features.wrapper.sampler import _stem
+
+    try:
+        proc = psutil.Process()
+        born = proc.create_time()
+        for _ in range(3):
+            proc = proc.parent()
+            stem = _stem(proc.name()) if proc is not None else ""
+            # Never python: Hermes and Aider are python agents, and their start is not our spawn.
+            if proc is None or stem not in _WRAPPERS:
+                break
+            born = min(born, proc.create_time())
+        return born
+    except psutil.Error:
+        return time.time()
+
+
 def _process_start_time(pid: int) -> float:
     created = process_identity(pid)
     return time.time() if created is None else created
@@ -116,7 +143,7 @@ def spawn_finalize(run_dir: Path) -> int | None:
     command = [sys.executable, "-m", "features.wrapper.cli", "finalize", "--run-dir", str(run_dir)]
     try:
         with (Path(run_dir) / FINALIZE_STDERR_FILENAME).open("ab") as err:
-            proc = subprocess.Popen(command, cwd=_repo_root(), **host.detach_kwargs(err))
+            proc = host.popen_detached(command, _repo_root(), err)
     except OSError:
         log_failure(get_logger("hook"), "finalize spawn failed", command=command, run_dir=str(run_dir))
         return None
@@ -148,7 +175,7 @@ def spawn_sampler(run_dir: Path, agent_pid: int, interval: float) -> int | None:
     try:
         # An import error or crash before the sampler's own logging is up would otherwise vanish.
         with (run_dir / SAMPLER_STDERR_FILENAME).open("ab") as err:
-            proc = subprocess.Popen(command, cwd=_repo_root(), **host.detach_kwargs(err))
+            proc = host.popen_detached(command, _repo_root(), err)
     except OSError:
         log_failure(log, "sampler spawn failed", command=command, run_dir=str(run_dir))
         return None
@@ -221,6 +248,7 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
             cwd=str(payload.get("cwd", "")),
             exit_status=_exit_status(_response_source(payload, extra)),
             agent_pid=agent_pid,
+            spawn_ts=_spawn_ts(),
         )
     elif event_name in _END_EVENTS:
         marker = Marker(

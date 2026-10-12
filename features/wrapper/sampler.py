@@ -22,8 +22,6 @@ from features.wrapper.schema import (
 
 # A tool's shell can be born a moment before the sampler that its own PreToolUse hook spawned.
 KID_GRACE_S = 5.0
-# argv entries (basename, .exe stripped) that mark Cordon's own hook, sampler and finalize.
-OWN_MARKERS = ("features.wrapper.cli", "cordon")
 
 # psutil is imported inside the functions that need it: the hook imports this module on every
 # tool call, and the hook path is latency-sensitive (see D7 in the plan).
@@ -331,8 +329,7 @@ class TreeSampler:
     def _is_kid(self, proc: Any) -> bool:
         """A process young enough to belong to a tool call, recorded once in procs.jsonl.
 
-        Cordon's own hook/sampler/finalize processes are descendants of the agent too, and the
-        PostToolUse hook is born inside the very window it closes, so they are excluded.
+        Which call (if any) a process belongs to is decided later, in reduce.
         """
         import psutil
 
@@ -344,9 +341,10 @@ class TreeSampler:
             include = created >= self.kids_since
             cmd: list[str] = []
             if include:
+                # Cordon's own processes are recorded too, so reduce can drop their whole tree
+                # (the hook's wrapper shell, its conhost) by the top-level command.
                 cmd = proc.cmdline()
-                include = not any(_stem(part) in OWN_MARKERS for part in cmd[:4])
-                if include and self.procs_writer is not None:
+                if self.procs_writer is not None:
                     self.procs_writer.write(
                         {"pid": proc.pid, "ppid": proc.ppid(), "created": round(created, 3), "name": proc.name(), "cmd": " ".join(cmd)[:300]}
                     )

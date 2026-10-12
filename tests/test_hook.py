@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from features import host
 from features.wrapper import hook as hook_module
 from features.wrapper.hook import spawn_finalize as real_spawn_finalize
 from features.wrapper.hook import spawn_sampler as real_spawn_sampler
@@ -242,7 +243,7 @@ def test_sampler_running_rejects_a_live_pid_that_is_not_a_sampler(run_dir: Path)
 
 def test_spawn_sampler_records_pid_and_clears_stale_stop_file(run_dir: Path, monkeypatch):
     stop_file(run_dir).touch()
-    monkeypatch.setattr(hook_module.subprocess, "Popen", lambda *_a, **_k: SimpleNamespace(pid=4242))
+    monkeypatch.setattr(host.subprocess, "Popen", lambda *_a, **_k: SimpleNamespace(pid=4242))
 
     assert real_spawn_sampler(run_dir, agent_pid=os.getpid(), interval=0.25) == 4242
     # The fake pid may belong to a real process on the runner, in which case its create_time is
@@ -260,7 +261,7 @@ def test_spawn_sampler_survives_a_failed_spawn(run_dir: Path, monkeypatch):
     def boom(*_a, **_k):
         raise OSError("no exec for you")
 
-    monkeypatch.setattr(hook_module.subprocess, "Popen", boom)
+    monkeypatch.setattr(host.subprocess, "Popen", boom)
     assert real_spawn_sampler(run_dir, agent_pid=os.getpid(), interval=0.25) is None
 
 
@@ -303,14 +304,14 @@ def test_spawn_finalize_runs_detached_cli_and_logs_stderr(run_dir: Path, monkeyp
         seen["command"], seen["kwargs"] = command, kwargs
         return SimpleNamespace(pid=77)
 
-    monkeypatch.setattr(hook_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(host.subprocess, "Popen", fake_popen)
     assert real_spawn_finalize(run_dir) == 77
     assert seen["command"][-3:] == ["finalize", "--run-dir", str(run_dir)]
     assert (run_dir / hook_module.FINALIZE_STDERR_FILENAME).exists()
 
 
 def test_spawn_finalize_survives_a_failed_spawn(run_dir: Path, monkeypatch):
-    monkeypatch.setattr(hook_module.subprocess, "Popen", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope")))
+    monkeypatch.setattr(host.subprocess, "Popen", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope")))
     assert real_spawn_finalize(run_dir) is None
 
 
