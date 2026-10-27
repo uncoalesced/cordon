@@ -6,12 +6,13 @@ import os
 import signal
 import time
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from features import host
-from features.wrapper.logging_setup import get_logger, log_failure
-from features.wrapper.schema import (
+from cordon import host
+from cordon.wrapper.logging_setup import get_logger, log_failure
+from cordon.wrapper.schema import (
     DEFAULT_INTERVAL_S,
     MARKERS_FILENAME,
     PROCS_FILENAME,
@@ -41,8 +42,15 @@ AGENT_EXECUTABLES = ("claude", "codex", "gemini", "cursor-agent", "hermes", "aid
 INTERPRETERS = ("node", "bun", "deno", "python")
 # Substrings of an interpreter's argv that identify the agent script it is running.
 AGENT_ARGV_MARKERS = (
-    "claude-code", "@anthropic-ai", "@openai/codex", "codex", "@google/gemini-cli", "gemini-cli",
-    "cursor-agent", "hermes", "aider",
+    "claude-code",
+    "@anthropic-ai",
+    "@openai/codex",
+    "codex",
+    "@google/gemini-cli",
+    "gemini-cli",
+    "cursor-agent",
+    "hermes",
+    "aider",
 )
 # Kept for callers that matched on plain names before scoring existed.
 AGENT_PROCESS_NAMES = {n for stem in (*AGENT_EXECUTABLES, "node", "bun") for n in (stem, f"{stem}.exe")}
@@ -346,7 +354,13 @@ class TreeSampler:
                 cmd = proc.cmdline()
                 if self.procs_writer is not None:
                     self.procs_writer.write(
-                        {"pid": proc.pid, "ppid": proc.ppid(), "created": round(created, 3), "name": proc.name(), "cmd": " ".join(cmd)[:300]}
+                        {
+                            "pid": proc.pid,
+                            "ppid": proc.ppid(),
+                            "created": round(created, 3),
+                            "name": proc.name(),
+                            "cmd": " ".join(cmd)[:300],
+                        }
                     )
         except psutil.Error as exc:
             self.errors[type(exc).__name__] += 1
@@ -534,6 +548,7 @@ def run_sampler(
     log = get_logger("sampler")
 
     if host.OS != host.WINDOWS:
+
         def _on_signal(signum: int, _frame: Any) -> None:
             signalled.append(signum)
 

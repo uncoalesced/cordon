@@ -260,10 +260,10 @@ cordon control contend --out contention.md     # guarded vs unguarded under CPU 
 
 ```
 assets/             logo, banner, social preview (see docs/design-language.md)
-features/host.py    the one place Linux, macOS and Windows differ: paths, quoting, detaching, data dirs
-features/wrapper/   hooks, sampler, reducer, finalize/report/status, doctor, agent registry, wrap
-features/analysis/  the analysis passes and the report
-features/control/   probe, hints, cgroup / systemd-run / advisory backends, guarded runner
+cordon/host.py    the one place Linux, macOS and Windows differ: paths, quoting, detaching, data dirs
+cordon/wrapper/   hooks, sampler, reducer, finalize/report/status, doctor, agent registry, wrap
+cordon/analysis/  the analysis passes and the report
+cordon/control/   probe, hints, cgroup / systemd-run / advisory backends, guarded runner
 scripts/            e2e_control.py, the real-kernel limit check CI runs on Linux and macOS
 docs/               design notes and findings
 tests/              pytest suite

@@ -9,7 +9,7 @@ from typing import Any
 # Claude Code, Codex CLI, Hermes Agent, Cursor CLI, and Gemini CLI each independently shipped
 # a hook system that is a renamed copy of the same idea: matcher + command groups, JSON piped
 # to a script on stdin carrying tool_name/tool_input/session_id/cwd, exit code 2 (or a decision
-# field) to block. features/wrapper/hook.py absorbs the event-name and field-name renaming via
+# field) to block. cordon/wrapper/hook.py absorbs the event-name and field-name renaming via
 # alias tables. This module only needs to know, per agent, where its config file lives and what
 # shape that file wants on disk.
 

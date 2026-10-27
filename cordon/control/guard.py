@@ -8,15 +8,16 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
-from features import host
-from features.control.cgroup import CgroupStats, attach_in_child, call_cgroup_name, select_backend
-from features.control.intent import FeedbackPolicy, resolve_intent
-from features.wrapper.logging_setup import get_logger, log_failure
-from features.wrapper.schema import DEFAULT_INTERVAL_S, append_jsonl
+from cordon import host
+from cordon.control.cgroup import CgroupStats, attach_in_child, call_cgroup_name, select_backend
+from cordon.control.intent import FeedbackPolicy, resolve_intent
+from cordon.wrapper.logging_setup import get_logger, log_failure
+from cordon.wrapper.schema import DEFAULT_INTERVAL_S, append_jsonl
 
 CONTROL_FILENAME = "control.jsonl"
 
@@ -172,17 +173,20 @@ def run_guarded(
 
     feedback = ""
     try:
-        feedback = policy.evaluate(
-            command=" ".join(argv),
-            intent=intent,
-            stall_s=stats.memory_stall_s,
-            duration_s=duration,
-            peak_memory_mb=stats.peak_memory_mb,
-            froze=stats.froze,
-            oom_kills=stats.oom_kills,
-            observable=stats.observable and attached,
-            stall_source=stats.stall_source or "psi",
-        ) or ""
+        feedback = (
+            policy.evaluate(
+                command=" ".join(argv),
+                intent=intent,
+                stall_s=stats.memory_stall_s,
+                duration_s=duration,
+                peak_memory_mb=stats.peak_memory_mb,
+                froze=stats.froze,
+                oom_kills=stats.oom_kills,
+                observable=stats.observable and attached,
+                stall_source=stats.stall_source or "psi",
+            )
+            or ""
+        )
     except Exception:
         log_failure(log, "feedback evaluation failed, suppressing message", cgroup=name, argv=argv)
 

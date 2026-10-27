@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from features.analysis.dataset import Run
-from features.wrapper import logging_setup
-from features.wrapper.schema import Sample, ToolCallRecord
+from cordon.analysis.dataset import Run
+from cordon.wrapper import logging_setup
+from cordon.wrapper.schema import Sample, ToolCallRecord
 
 
 @pytest.fixture(autouse=True)

@@ -8,13 +8,14 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from features import host
-from features.wrapper import agents
-from features.wrapper.schema import MARKERS_FILENAME, SAMPLES_FILENAME
+from cordon import host
+from cordon.wrapper import agents
+from cordon.wrapper.schema import MARKERS_FILENAME, SAMPLES_FILENAME
 
 # `cordon doctor`: every link between "agent fires a hook" and "report.md exists", exercised for
 # real against a throwaway run root. Each check is independent and never raises; a crash inside
@@ -65,7 +66,7 @@ def _commands_in(node: Any) -> set[str]:
 
 
 def check_installed(agent: str, scope: str, target: str, command: str) -> CheckResult:
-    from features.wrapper.cli import install_hooks_hint
+    from cordon.wrapper.cli import install_hooks_hint
 
     path = agents.settings_path(agent, agents.install_target(scope, target).resolve())
     fix = install_hooks_hint(agent, scope, target)
@@ -118,7 +119,12 @@ def check_roundtrip(command: str, run_root: Path) -> CheckResult:
             timeout=ROUNDTRIP_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
-        return CheckResult("roundtrip", FAIL, f"hook command hung for {ROUNDTRIP_TIMEOUT_S:.0f}s: {command}", "run it by hand and read its stderr")
+        return CheckResult(
+            "roundtrip",
+            FAIL,
+            f"hook command hung for {ROUNDTRIP_TIMEOUT_S:.0f}s: {command}",
+            "run it by hand and read its stderr",
+        )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     markers = run_root / DOCTOR_SESSION / MARKERS_FILENAME
     if proc.returncode != 0:
@@ -126,14 +132,16 @@ def check_roundtrip(command: str, run_root: Path) -> CheckResult:
         tail = err[-1] if err else "no stderr"
         return CheckResult("roundtrip", FAIL, f"exit {proc.returncode} ({tail})", f"run by hand: {command}")
     if not markers.exists() or not markers.read_text(encoding="utf-8").strip():
-        return CheckResult("roundtrip", FAIL, f"exit 0 but no {MARKERS_FILENAME} written", f"check {run_root / DOCTOR_SESSION} / cordon.log")
+        return CheckResult(
+            "roundtrip", FAIL, f"exit 0 but no {MARKERS_FILENAME} written", f"check {run_root / DOCTOR_SESSION} / cordon.log"
+        )
     return CheckResult("roundtrip", PASS, f"exit 0, marker written, {elapsed_ms:.0f} ms")
 
 
 def check_agent_root() -> CheckResult:
     import psutil
 
-    from features.wrapper.sampler import agent_score, resolve_agent_root
+    from cordon.wrapper.sampler import agent_score, resolve_agent_root
 
     saved = os.environ.pop("CORDON_AGENT_PID", None)
     try:
@@ -158,9 +166,9 @@ def check_agent_root() -> CheckResult:
 
 
 def check_sampler(run_dir: Path) -> CheckResult:
-    from features.wrapper.finalize import wait_for_sampler
-    from features.wrapper.hook import spawn_sampler
-    from features.wrapper.sampler import stop_file
+    from cordon.wrapper.finalize import wait_for_sampler
+    from cordon.wrapper.hook import spawn_sampler
+    from cordon.wrapper.sampler import stop_file
 
     pid = spawn_sampler(run_dir, os.getpid(), 0.1)
     if pid is None:
@@ -173,14 +181,16 @@ def check_sampler(run_dir: Path) -> CheckResult:
     stop_file(run_dir).touch()
     stopped = wait_for_sampler(run_dir, SAMPLER_WAIT_S)
     if not got_samples:
-        return CheckResult("sampler", FAIL, f"pid {pid} wrote no samples in {SAMPLER_WAIT_S:.0f}s", f"read {run_dir / 'sampler.stderr'}")
+        return CheckResult(
+            "sampler", FAIL, f"pid {pid} wrote no samples in {SAMPLER_WAIT_S:.0f}s", f"read {run_dir / 'sampler.stderr'}"
+        )
     if not stopped:
         return CheckResult("sampler", FAIL, f"pid {pid} ignored STOP for {SAMPLER_WAIT_S:.0f}s", f"kill {pid}; read cordon.log")
     return CheckResult("sampler", PASS, f"pid {pid} sampled and stopped on STOP")
 
 
 def check_finalize(run_dir: Path) -> CheckResult:
-    from features.wrapper.finalize import finalize
+    from cordon.wrapper.finalize import finalize
 
     out = finalize(run_dir, wait_s=1.0)
     if out is None or not Path(out).exists():
@@ -189,7 +199,7 @@ def check_finalize(run_dir: Path) -> CheckResult:
 
 
 def check_run_root(root: Path) -> CheckResult:
-    from features.wrapper.finalize import collect_status
+    from cordon.wrapper.finalize import collect_status
 
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -205,7 +215,7 @@ def check_run_root(root: Path) -> CheckResult:
 
 
 def check_enforcement() -> CheckResult:
-    from features.control import probe
+    from cordon.control import probe
 
     tier = probe.enforcement_tier(probe.probe())
     if host.OS == host.WINDOWS:
@@ -221,8 +231,8 @@ def _guarded(name: str, check: Callable[[], CheckResult]) -> CheckResult:
 
 
 def run_checks(agent: str = agents.CLAUDE_CODE, scope: str = agents.SCOPE_PROJECT, target: str = ".") -> list[CheckResult]:
-    from features.wrapper.cli import _hook_command, install_hook_command, user_run_root
-    from features.wrapper.hook import default_run_root
+    from cordon.wrapper.cli import _hook_command, install_hook_command, user_run_root
+    from cordon.wrapper.hook import default_run_root
 
     user_global = agents.is_user_global(agent, scope)
     installed = install_hook_command(agent, scope)

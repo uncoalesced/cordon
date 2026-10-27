@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
-from features.wrapper.hook import default_run_root, spawn_sampler
-from features.wrapper.logging_setup import configure, get_logger, log_failure
-from features.wrapper.sampler import DEFAULT_INTERVAL_S, stop_file
-from features.wrapper.schema import (
+from cordon.wrapper.hook import default_run_root, spawn_sampler
+from cordon.wrapper.logging_setup import configure, get_logger, log_failure
+from cordon.wrapper.sampler import DEFAULT_INTERVAL_S, stop_file
+from cordon.wrapper.schema import (
     EVENT_SESSION_END,
     EVENT_SESSION_START,
     MARKERS_FILENAME,

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import re
 import statistics
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
-from features.analysis.dataset import Run
-from features.wrapper.logging_setup import get_logger, log_failure
-from features.wrapper.reduce import union_seconds
-from features.wrapper.schema import Sample, ToolCallRecord
+from cordon.analysis.dataset import Run
+from cordon.wrapper.logging_setup import get_logger, log_failure
+from cordon.wrapper.reduce import union_seconds
+from cordon.wrapper.schema import Sample, ToolCallRecord
 
 BURST_THRESHOLD_MB = 300.0
 BASELINE_QUANTILE = 0.1
@@ -365,11 +366,7 @@ def retry_profile(
             index += 1
             continue
         end = index + 1
-        while (
-            end < len(sequence)
-            and sequence[end].tool_type == current.tool_type
-            and sequence[end].command == current.command
-        ):
+        while end < len(sequence) and sequence[end].tool_type == current.tool_type and sequence[end].command == current.command:
             end += 1
         length = end - index
         if length >= min_length:
@@ -403,9 +400,7 @@ def analyze_run(run: Run, burst_threshold_mb: float = BURST_THRESHOLD_MB) -> Run
         metrics.tool_types = tool_type_breakdown(run.toolcalls)
         metrics.bash_categories = bash_category_breakdown(run.toolcalls)
         metrics.retries = retry_profile(run.toolcalls)
-        metrics.cpu_memory_correlation = _correlation(
-            [s.mem_mb for s in run.samples], [s.cpu_pct for s in run.samples]
-        )
+        metrics.cpu_memory_correlation = _correlation([s.mem_mb for s in run.samples], [s.cpu_pct for s in run.samples])
     except Exception:
         metrics.degraded = True
         log_failure(

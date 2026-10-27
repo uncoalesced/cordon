@@ -9,9 +9,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from features import host
-from features.wrapper.logging_setup import configure, get_logger, log_failure
-from features.wrapper.sampler import (
+from cordon import host
+from cordon.wrapper.logging_setup import configure, get_logger, log_failure
+from cordon.wrapper.sampler import (
     DEFAULT_INTERVAL_S,
     cached_agent_root,
     identity_matches,
@@ -20,7 +20,7 @@ from features.wrapper.sampler import (
     stop_file,
     write_pid_file,
 )
-from features.wrapper.schema import (
+from cordon.wrapper.schema import (
     EVENT_SESSION_END,
     EVENT_SESSION_START,
     EVENT_TOOL_END,
@@ -42,7 +42,7 @@ SAMPLER_STDERR_FILENAME = "sampler.stderr"
 FINALIZE_STDERR_FILENAME = "finalize.stderr"
 
 # Claude Code, Codex, Hermes, Cursor, and Gemini CLI all fire the same four lifecycle moments
-# through a hook; each just spells the event name differently. See features/wrapper/agents.py
+# through a hook; each just spells the event name differently. See cordon/wrapper/agents.py
 # for the config-side half of this (where each agent's hook file lives, what shape it wants).
 _START_EVENTS = {"SessionStart", "on_session_start", "sessionStart"}
 _END_EVENTS = {"SessionEnd", "Stop", "on_session_end", "sessionEnd", "stop"}
@@ -92,7 +92,7 @@ def _spawn_ts() -> float:
     """
     import psutil
 
-    from features.wrapper.sampler import _stem
+    from cordon.wrapper.sampler import _stem
 
     try:
         proc = psutil.Process()
@@ -140,7 +140,7 @@ def _repo_root() -> str:
 
 def spawn_finalize(run_dir: Path) -> int | None:
     """Detached `cordon finalize`: waits for the sampler, reduces, writes runs/<id>/report.md."""
-    command = [sys.executable, "-m", "features.wrapper.cli", "finalize", "--run-dir", str(run_dir)]
+    command = [sys.executable, "-m", "cordon.wrapper.cli", "finalize", "--run-dir", str(run_dir)]
     try:
         with (Path(run_dir) / FINALIZE_STDERR_FILENAME).open("ab") as err:
             proc = host.popen_detached(command, _repo_root(), err)
@@ -149,6 +149,7 @@ def spawn_finalize(run_dir: Path) -> int | None:
         return None
     get_logger("hook").info("finalize spawned | pid=%s run_dir=%s", proc.pid, run_dir)
     return proc.pid
+
 
 def spawn_sampler(run_dir: Path, agent_pid: int, interval: float) -> int | None:
     log = get_logger("hook")
@@ -163,7 +164,7 @@ def spawn_sampler(run_dir: Path, agent_pid: int, interval: float) -> int | None:
     command = [
         sys.executable,
         "-m",
-        "features.wrapper.cli",
+        "cordon.wrapper.cli",
         "sample",
         "--run-dir",
         str(run_dir),

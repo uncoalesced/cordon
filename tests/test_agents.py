@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from features.wrapper import agents
+from cordon.wrapper import agents
 
 COMMAND = '"cordon.exe" hook'
 
@@ -105,7 +105,7 @@ def test_ensure_codex_feature_flag_is_idempotent_once_true():
 
 
 def test_ensure_codex_feature_flag_preserves_unrelated_tables():
-    original = "[model]\nname = \"gpt\"\n\n[features]\ncodex_hooks = false\n"
+    original = '[model]\nname = "gpt"\n\n[features]\ncodex_hooks = false\n'
     rendered = agents.ensure_codex_feature_flag(original)
     assert 'name = "gpt"' in rendered
     assert "codex_hooks = true" in rendered

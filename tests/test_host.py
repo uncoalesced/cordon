@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from features import host
-from features.wrapper import logging_setup
+from cordon import host
+from cordon.wrapper import logging_setup
 
 
 @pytest.mark.parametrize(
     "platform,expected",
-    [("linux", host.LINUX), ("darwin", host.DARWIN), ("win32", host.WINDOWS), ("cygwin", host.WINDOWS), ("freebsd14", host.OTHER)],
+    [
+        ("linux", host.LINUX),
+        ("darwin", host.DARWIN),
+        ("win32", host.WINDOWS),
+        ("cygwin", host.WINDOWS),
+        ("freebsd14", host.OTHER),
+    ],
 )
 def test_current_os(platform, expected):
     assert host.current_os(platform) == expected
@@ -60,8 +67,25 @@ def test_detach_kwargs_posix_starts_new_session():
 
 
 @pytest.mark.skipif(host.OS != host.WINDOWS, reason="creationflags constants only exist on Windows")
-def test_detach_kwargs_windows_detaches():
-    assert host.detach_kwargs(os_name="nt")["creationflags"] & subprocess.DETACHED_PROCESS
+def test_detach_kwargs_windows_never_opens_a_window():
+    flags = host.detach_kwargs(os_name="nt")["creationflags"]
+    assert flags & subprocess.CREATE_NO_WINDOW
+    # DETACHED_PROCESS overrides CREATE_NO_WINDOW and lets the venv redirector's child open a console.
+    assert not flags & subprocess.DETACHED_PROCESS
+
+
+@pytest.mark.skipif(host.OS != host.WINDOWS, reason="console windows are a Windows concern")
+def test_detached_grandchild_gets_no_visible_console(tmp_path):
+    # A venv python.exe re-launches the base interpreter; that grandchild must inherit a hidden console.
+    out = tmp_path / "hwnd.txt"
+    code = (
+        "import ctypes,subprocess,sys;"
+        "c=subprocess.run([sys.executable,'-c','import ctypes;h=ctypes.windll.kernel32.GetConsoleWindow();"
+        "print(int(bool(h)) and ctypes.windll.user32.IsWindowVisible(h))'],capture_output=True,text=True);"
+        f"open({str(out)!r},'w').write(c.stdout.strip())"
+    )
+    host.popen_detached([sys.executable, "-c", code], cwd=str(tmp_path)).wait(timeout=30)
+    assert out.read_text().strip() == "0"
 
 
 def test_user_data_dir_per_os(tmp_path):

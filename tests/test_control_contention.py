@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from features.control.cgroup import NullBackend
-from features.control.contention import (
+from cordon.control.cgroup import NullBackend
+from cordon.control.contention import (
     ContentionResult,
     PhaseResult,
     WorkerResult,

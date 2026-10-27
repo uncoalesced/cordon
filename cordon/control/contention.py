@@ -10,10 +10,10 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from features import host
-from features.control.cgroup import attach_in_child, call_cgroup_name, select_backend
-from features.control.intent import resolve_intent
-from features.wrapper.logging_setup import get_logger, log_failure
+from cordon import host
+from cordon.control.cgroup import attach_in_child, call_cgroup_name, select_backend
+from cordon.control.intent import resolve_intent
+from cordon.wrapper.logging_setup import get_logger, log_failure
 
 DEFAULT_WORK = 12_000_000
 POLL_S = 0.02
@@ -185,8 +185,7 @@ def render(result: ContentionResult) -> str:
     lines = [
         "# Synthetic CPU contention",
         "",
-        f"backend={result.backend}  cpus={result.cpu_count}  work={result.work}  "
-        f"solo={result.solo_s:.3f}s",
+        f"backend={result.backend}  cpus={result.cpu_count}  work={result.work}  solo={result.solo_s:.3f}s",
         f"workers: {len(result.baseline.workers)} "
         f"({sum(1 for w in result.baseline.workers if w.tier == 'high')} high, "
         f"{sum(1 for w in result.baseline.workers if w.tier == 'low')} low)",

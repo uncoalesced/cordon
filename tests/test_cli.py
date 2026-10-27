@@ -8,9 +8,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from features.wrapper import agents
-from features.wrapper.cli import _hook_command, build_parser, main
-from features.wrapper.schema import MARKERS_FILENAME, SAMPLES_FILENAME, JsonlWriter, Marker, Sample
+from cordon.wrapper import agents
+from cordon.wrapper.cli import _hook_command, build_parser, main
+from cordon.wrapper.schema import MARKERS_FILENAME, SAMPLES_FILENAME, JsonlWriter, Marker, Sample
 
 HOOK_EVENTS = agents.NESTED_EVENTS[agents.CLAUDE_CODE]
 _merge_hooks = agents.merge_nested
@@ -145,7 +145,10 @@ def test_reduce_command_prints_summary(tmp_path: Path, capsys):
 
 def test_sample_command_writes_a_stream(tmp_path: Path):
     run_dir = tmp_path / "run"
-    assert main(["sample", "--run-dir", str(run_dir), "--pid", str(os.getpid()), "--interval", "0.01", "--max-duration", "0.15"]) == 0
+    assert (
+        main(["sample", "--run-dir", str(run_dir), "--pid", str(os.getpid()), "--interval", "0.01", "--max-duration", "0.15"])
+        == 0
+    )
     assert (run_dir / SAMPLES_FILENAME).exists()
 
 
@@ -187,7 +190,7 @@ def test_analyze_reports_measured_numbers(tmp_path: Path, capsys):
 
 def test_analyze_aborts_cleanly_when_loading_explodes(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
-        "features.analysis.dataset.load_dataset",
+        "cordon.analysis.dataset.load_dataset",
         lambda _root: (_ for _ in ()).throw(RuntimeError("disk on fire")),
     )
     assert main(["analyze", "--runs", str(tmp_path)]) == 1
@@ -218,7 +221,7 @@ def test_control_probe_runs_on_a_host_without_psutil():
         "        raise ImportError('No module named psutil')\n"
         "    return _real(name, *a, **k)\n"
         "builtins.__import__ = _guard\n"
-        "from features.wrapper.cli import main\n"
+        "from cordon.wrapper.cli import main\n"
         "sys.exit(main(['control', 'probe']))\n"
     )
     proc = subprocess.run(
@@ -253,7 +256,7 @@ def test_control_run_records_the_call(tmp_path: Path, capsys):
 
 def test_control_run_aborts_cleanly_when_the_guard_explodes(monkeypatch):
     monkeypatch.setattr(
-        "features.control.guard.run_guarded",
+        "cordon.control.guard.run_guarded",
         lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("cgroupfs on fire")),
     )
     assert main(["control", "run", "--", "true"]) == 1
@@ -267,7 +270,7 @@ def test_control_contend_writes_a_report(tmp_path: Path):
 
 def test_control_contend_aborts_cleanly(monkeypatch):
     monkeypatch.setattr(
-        "features.control.contention.run_contention",
+        "cordon.control.contention.run_contention",
         lambda **_k: (_ for _ in ()).throw(RuntimeError("no cores")),
     )
     assert main(["control", "contend"]) == 1
@@ -325,12 +328,12 @@ def test_install_hooks_project_scope_has_no_run_root(tmp_path: Path):
 
 
 def host_quote(value: str) -> str:
-    from features import host
+    from cordon import host
 
     return host.shell_quote(value)
 
 
 def user_runs() -> Path:
-    from features.wrapper.cli import user_run_root
+    from cordon.wrapper.cli import user_run_root
 
     return user_run_root()

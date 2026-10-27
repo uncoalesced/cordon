@@ -8,12 +8,13 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from features import host
-from features.wrapper.logging_setup import get_logger, log_failure
+from cordon import host
+from cordon.wrapper.logging_setup import get_logger, log_failure
 
 CGROUP2_ROOT = Path("/sys/fs/cgroup")
 PROC_SELF_CGROUP = Path("/proc/self/cgroup")
@@ -100,10 +101,7 @@ def describe_environment(env: dict[str, str] | None = None) -> str:
     env = dict(os.environ) if env is None else env
     labels: list[str] = []
     android = (
-        sys.platform == "android"
-        or platform.system() == "Android"
-        or bool(env.get("ANDROID_ROOT"))
-        or ANDROID_MARKER.exists()
+        sys.platform == "android" or platform.system() == "Android" or bool(env.get("ANDROID_ROOT")) or ANDROID_MARKER.exists()
     )
     if android:
         labels.append("Android")
@@ -255,9 +253,7 @@ def find_delegated_base(
     return best
 
 
-def probe_cgroup2_delegated(
-    mount: Path = CGROUP2_ROOT, proc_self_cgroup: Path = PROC_SELF_CGROUP
-) -> Capability:
+def probe_cgroup2_delegated(mount: Path = CGROUP2_ROOT, proc_self_cgroup: Path = PROC_SELF_CGROUP) -> Capability:
     found = find_delegated_base(mount, proc_self_cgroup)
     if found is None:
         rel = own_cgroup(proc_self_cgroup)
@@ -382,7 +378,11 @@ def probe(root: Path = CGROUP2_ROOT) -> list[Capability]:
 def enforcement_tier(capabilities: list[Capability]) -> str:
     by_name = {cap.name: cap.available for cap in capabilities}
     # A transient systemd user scope is a cgroup v2 node too, so it counts as cgroup2 enforcement.
-    cgroup = (by_name.get("cgroup2") and by_name.get("cgroup2_writable")) or by_name.get("cgroup2_delegated") or by_name.get("systemd_run_user")
+    cgroup = (
+        (by_name.get("cgroup2") and by_name.get("cgroup2_writable"))
+        or by_name.get("cgroup2_delegated")
+        or by_name.get("systemd_run_user")
+    )
     if cgroup:
         if by_name.get("sched_ext") and by_name.get("memcg_bpf_ops") and by_name.get("capabilities"):
             return "bpf"
@@ -420,7 +420,5 @@ _TIER_NOTES = {
         "accounting. The in-kernel BPF policy layer (sched_ext for CPU, memcg_bpf_ops for memory)\n"
         "is absent, so throttle decisions stay at kernel default."
     ),
-    "bpf": (
-        "Full enforcement available: cgroup v2 plus the in-kernel BPF policy layer."
-    ),
+    "bpf": ("Full enforcement available: cgroup v2 plus the in-kernel BPF policy layer."),
 }

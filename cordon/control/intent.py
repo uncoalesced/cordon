@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
-from features.wrapper.logging_setup import get_logger
+from cordon.wrapper.logging_setup import get_logger
 
 ENV_HINT = "AGENT_RESOURCE_HINT"
 
@@ -213,10 +214,7 @@ def render_feedback(
     limit_text = "no memory limit" if limit is None else f"a memory:{intent.memory_tier} limit of {limit} MB"
     share = (stall_s / duration_s * 100.0) if duration_s > 0 else 0.0
 
-    parts = [
-        f"[cordon] This tool call was resource-limited. It peaked at {peak_memory_mb:.1f} MB "
-        f"against {limit_text}."
-    ]
+    parts = [f"[cordon] This tool call was resource-limited. It peaked at {peak_memory_mb:.1f} MB against {limit_text}."]
     if stall_s > 0 and stall_source == "watchdog":
         # Advisory hosts (macOS, Linux without cgroups) measure time over the limit, not stall.
         parts.append(
@@ -224,9 +222,7 @@ def render_feedback(
             "limit; this host only advises, so nothing was throttled, but on a cgroup host it would be."
         )
     elif stall_s > 0:
-        parts.append(
-            f"It stalled {stall_s:.2f}s ({share:.0f}% of its {duration_s:.1f}s runtime) waiting on memory."
-        )
+        parts.append(f"It stalled {stall_s:.2f}s ({share:.0f}% of its {duration_s:.1f}s runtime) waiting on memory.")
     if froze:
         parts.append("It was frozen and resumed rather than killed, so no work was lost.")
     if oom_kills:
@@ -234,8 +230,7 @@ def render_feedback(
 
     if occurrence >= 3:
         parts.append(
-            f"This is limit warning number {occurrence} for this exact command; "
-            "retrying it unchanged is unlikely to help."
+            f"This is limit warning number {occurrence} for this exact command; retrying it unchanged is unlikely to help."
         )
 
     parts.append(

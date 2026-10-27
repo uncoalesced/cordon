@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from features.analysis.metrics import analyze_dataset
-from features.analysis.report import comparison_rows, render_report
+from cordon.analysis.metrics import analyze_dataset
+from cordon.analysis.report import comparison_rows, render_report
 
 
 def _verdicts(dataset):
@@ -85,7 +85,7 @@ def test_report_renders_every_section(make_run, make_call, make_samples):
 
 def test_report_flags_degraded_runs(make_run, monkeypatch):
     monkeypatch.setattr(
-        "features.analysis.metrics.execution_split",
+        "cordon.analysis.metrics.execution_split",
         lambda _run: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     report = render_report(analyze_dataset([make_run()]))

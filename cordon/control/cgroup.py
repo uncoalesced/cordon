@@ -5,13 +5,14 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from features import host
-from features.control.intent import Intent
-from features.control.probe import (
+from cordon import host
+from cordon.control.intent import Intent
+from cordon.control.probe import (
     CGROUP2_ROOT,
     PROC_SELF_CGROUP,
     REQUIRED_CONTROLLERS,
@@ -19,7 +20,7 @@ from features.control.probe import (
     own_cgroup,
     systemd_run_user_works,
 )
-from features.wrapper.logging_setup import get_logger, log_failure
+from cordon.wrapper.logging_setup import get_logger, log_failure
 
 PARENT_NAME = "cordon"
 DESTROY_RETRIES = 20
@@ -436,7 +437,7 @@ def select_backend(
 ) -> Any:
     """First backend that passes a real probe: delegated cgroup, root cgroup, systemd scope,
     advisory watchdog, null. Each candidate actually creates and removes something."""
-    from features.control.advisory import AdvisoryBackend
+    from cordon.control.advisory import AdvisoryBackend
 
     log = get_logger("cgroup")
     os_kind = host.OS if os_kind is None else os_kind

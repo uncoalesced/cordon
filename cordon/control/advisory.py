@@ -5,15 +5,15 @@ from __future__ import annotations
 import math
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
-from features import host
-from features.control.cgroup import CgroupHandle, CgroupStats, NullBackend
-from features.control.intent import Intent
-from features.control.probe import TASKPOLICY
-from features.wrapper.logging_setup import get_logger
+from cordon import host
+from cordon.control.cgroup import CgroupHandle, CgroupStats, NullBackend
+from cordon.control.intent import Intent
+from cordon.control.probe import TASKPOLICY
+from cordon.wrapper.logging_setup import get_logger
 
 # Soft enforcement for hosts without a usable cgroup v2: macOS always, Linux as the last resort
 # (WSL1, proot, locked containers). CPU share becomes a nice value; memory.high becomes a
@@ -174,4 +174,3 @@ class AdvisoryBackend(NullBackend):
     def destroy(self, handle: CgroupHandle) -> bool:
         self._watch.pop(handle.name, None)
         return True
-

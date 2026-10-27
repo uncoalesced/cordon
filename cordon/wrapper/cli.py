@@ -9,16 +9,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from features import host
-from features.wrapper import agents
-from features.wrapper.logging_setup import configure, get_logger, log_failure
-from features.wrapper.schema import DEFAULT_INTERVAL_S, RUN_LOG_FILENAME
+from cordon import host
+from cordon.wrapper import agents
+from cordon.wrapper.logging_setup import configure, get_logger, log_failure
+from cordon.wrapper.schema import DEFAULT_INTERVAL_S, RUN_LOG_FILENAME
 
 # Everything heavier is imported inside the command that needs it:
 # - `cordon hook` runs on every tool call, so it must not pay for analysis/control/yaml imports
 #   (main() also skips building the parser for it);
 # - psutil does not build on every host, and `cordon control probe` must answer without it.
 #   See docs/stage2-host-audit.md.
+
 
 def _hook_command(run_root: Path | None = None, os_name: str | None = None) -> str:
     """The exact string an agent runs through sh -c / cmd /c for every hook event."""
@@ -28,7 +29,7 @@ def _hook_command(run_root: Path | None = None, os_name: str | None = None) -> s
     else:
         if script.exists():
             get_logger("cli").warning("%s is not executable, hooking via the interpreter instead", script)
-        command = f"{host.shell_quote(sys.executable, os_name=os_name)} -m features.wrapper.cli hook"
+        command = f"{host.shell_quote(sys.executable, os_name=os_name)} -m cordon.wrapper.cli hook"
     if run_root is not None:
         # A flag, not an inline `VAR=x cmd` prefix: cmd.exe has no such syntax.
         command += f" --run-root {host.shell_quote(str(run_root), os_name=os_name)}"
@@ -62,7 +63,7 @@ def _read_json(path: Path, log: Any) -> dict[str, Any] | None:
 
 
 def cmd_sample(args: argparse.Namespace) -> int:
-    from features.wrapper.sampler import resolve_agent_root, run_sampler
+    from cordon.wrapper.sampler import resolve_agent_root, run_sampler
 
     run_dir = Path(args.run_dir)
     configure(log_path=run_dir / RUN_LOG_FILENAME, level=logging.DEBUG if args.verbose else logging.INFO)
@@ -83,7 +84,7 @@ def cmd_sample(args: argparse.Namespace) -> int:
 
 
 def cmd_reduce(args: argparse.Namespace) -> int:
-    from features.wrapper.reduce import reduce_run
+    from cordon.wrapper.reduce import reduce_run
 
     run_dir = Path(args.run_dir)
     configure(log_path=run_dir / RUN_LOG_FILENAME, level=logging.DEBUG if args.verbose else logging.INFO)
@@ -100,9 +101,9 @@ def cmd_reduce(args: argparse.Namespace) -> int:
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
-    from features.analysis import dataset as dataset_module
-    from features.analysis.metrics import analyze_dataset
-    from features.analysis.report import render_report
+    from cordon.analysis import dataset as dataset_module
+    from cordon.analysis.metrics import analyze_dataset
+    from cordon.analysis.report import render_report
 
     configure(level=logging.DEBUG if args.verbose else logging.INFO)
     log = get_logger("cli")
@@ -202,13 +203,13 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
 
 
 def cmd_hook(args: argparse.Namespace) -> int:
-    from features.wrapper import hook as hook_module
+    from cordon.wrapper import hook as hook_module
 
     return hook_module.main(run_root=getattr(args, "run_root", None))
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    from features.wrapper import doctor
+    from cordon.wrapper import doctor
 
     configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
     results = doctor.run_checks(agent=args.agent, scope=args.scope, target=args.target)
@@ -220,7 +221,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_wrap(args: argparse.Namespace) -> int:
-    from features.wrapper.wrap import run_wrap
+    from cordon.wrapper.wrap import run_wrap
 
     configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
     log = get_logger("cli")
@@ -242,7 +243,7 @@ def cmd_wrap(args: argparse.Namespace) -> int:
 
 
 def cmd_control_probe(args: argparse.Namespace) -> int:
-    from features.control import probe as probe_module
+    from cordon.control import probe as probe_module
 
     configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
     capabilities = probe_module.probe()
@@ -254,7 +255,7 @@ def cmd_control_probe(args: argparse.Namespace) -> int:
 
 
 def cmd_control_run(args: argparse.Namespace) -> int:
-    from features.control import guard
+    from cordon.control import guard
 
     configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
     log = get_logger("cli")
@@ -281,7 +282,7 @@ def cmd_control_run(args: argparse.Namespace) -> int:
 
 
 def cmd_control_contend(args: argparse.Namespace) -> int:
-    from features.control import contention
+    from cordon.control import contention
 
     configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
     log = get_logger("cli")
@@ -309,19 +310,19 @@ def cmd_control_contend(args: argparse.Namespace) -> int:
 
 
 def cmd_finalize(args: argparse.Namespace) -> int:
-    from features.wrapper.finalize import finalize
+    from cordon.wrapper.finalize import finalize
 
     return 0 if finalize(Path(args.run_dir), wait_s=args.wait) else 1
 
 
 def _runs_root(args: argparse.Namespace) -> Path:
-    from features.wrapper.hook import default_run_root
+    from cordon.wrapper.hook import default_run_root
 
     return Path(args.runs) if args.runs else default_run_root()
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    from features.wrapper import finalize as finalize_module
+    from cordon.wrapper import finalize as finalize_module
 
     configure(level=logging.DEBUG if args.verbose else logging.INFO)
     log = get_logger("cli")
@@ -355,7 +356,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    from features.wrapper.finalize import clean_orphans, collect_status, render_status
+    from cordon.wrapper.finalize import clean_orphans, collect_status, render_status
 
     configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
     root = _runs_root(args)
@@ -368,9 +369,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    from features.analysis.metrics import BURST_THRESHOLD_MB
-    from features.control.contention import DEFAULT_WORK
-    from features.control.intent import ENV_HINT as INTENT_ENV
+    from cordon.analysis.metrics import BURST_THRESHOLD_MB
+    from cordon.control.contention import DEFAULT_WORK
+    from cordon.control.intent import ENV_HINT as INTENT_ENV
 
     parser = argparse.ArgumentParser(prog="cordon", description="Agent tool-call resource characterization")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -437,9 +438,7 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--clean", action="store_true", help="stop samplers whose agent is gone or idle")
     status.set_defaults(func=cmd_status)
 
-    wrap = subparsers.add_parser(
-        "wrap", help="run an agent with no hook system (e.g. Aider) as a child and sample it directly"
-    )
+    wrap = subparsers.add_parser("wrap", help="run an agent with no hook system (e.g. Aider) as a child and sample it directly")
     wrap.add_argument("--interval", type=float, default=None)
     wrap.add_argument("--json", action="store_true")
     wrap.add_argument("argv", nargs=argparse.REMAINDER)

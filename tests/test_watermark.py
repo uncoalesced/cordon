@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 WATERMARK = "# Engineered by uncoalesced"
-SOURCE_ROOTS = ("features", "tests")
+SOURCE_ROOTS = ("cordon", "tests", "scripts")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

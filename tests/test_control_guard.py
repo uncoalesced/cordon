@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from features.control.cgroup import CgroupHandle, CgroupStats, NullBackend
-from features.control.guard import run_guarded
-from features.control.intent import ENV_HINT, FeedbackPolicy
-from features.wrapper.schema import read_jsonl
+from cordon.control.cgroup import CgroupHandle, CgroupStats, NullBackend
+from cordon.control.guard import run_guarded
+from cordon.control.intent import ENV_HINT, FeedbackPolicy
+from cordon.wrapper.schema import read_jsonl
 
 GB = 1024**3
 
@@ -127,9 +127,7 @@ def test_no_feedback_when_nothing_was_throttled(capsys):
 
 
 def test_an_unattached_process_never_gets_feedback_about_limits_it_never_had(capsys):
-    backend = RecordingBackend(
-        CgroupStats(peak_memory_mb=1842.0, memory_stall_s=9.0, observable=True), attached=False
-    )
+    backend = RecordingBackend(CgroupStats(peak_memory_mb=1842.0, memory_stall_s=9.0, observable=True), attached=False)
     result = run_guarded(_echo("hi"), backend=backend, env={}, interval=0.01)
     assert result.attached is False
     assert result.feedback == ""
@@ -203,8 +201,8 @@ def test_an_attach_error_report_from_the_child_is_decoded():
     import errno
     import os
 
-    from features.control.guard import _read_attach_report
-    from features.wrapper.logging_setup import get_logger
+    from cordon.control.guard import _read_attach_report
+    from cordon.wrapper.logging_setup import get_logger
 
     read_fd, write_fd = os.pipe()
     os.write(write_fd, b"E%d" % errno.EACCES)

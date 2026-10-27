@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-from features.wrapper.logging_setup import get_logger, log_failure
+from cordon.wrapper.logging_setup import get_logger, log_failure
 
 SCHEMA_VERSION = 1
 
@@ -49,7 +50,7 @@ class Sample:
         return {k: v for k, v in asdict(self).items() if v is not None}
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "Sample":
+    def from_dict(cls, raw: dict[str, Any]) -> Sample:
         unique = raw.get("mem_mb_unique")
         cgroup = raw.get("cg_mem_mb")
         return cls(
@@ -85,7 +86,7 @@ class Marker:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "Marker":
+    def from_dict(cls, raw: dict[str, Any]) -> Marker:
         return cls(
             event=str(raw["event"]),
             ts=float(raw["ts"]),
@@ -137,7 +138,7 @@ class ToolCallRecord:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "ToolCallRecord":
+    def from_dict(cls, raw: dict[str, Any]) -> ToolCallRecord:
         return cls(
             task_id=str(raw.get("task_id", "")),
             tool_type=str(raw.get("tool_type", "")),
@@ -181,7 +182,7 @@ def call_key_for(session_id: str, tool_name: str, tool_input: Any, tool_use_id: 
         payload = json.dumps(tool_input, sort_keys=True, default=repr)
     except (TypeError, ValueError):
         payload = repr(tool_input)
-    digest = hashlib.sha1(f"{session_id}\x00{tool_name}\x00{payload}".encode("utf-8"))
+    digest = hashlib.sha1(f"{session_id}\x00{tool_name}\x00{payload}".encode())
     return digest.hexdigest()[:16]
 
 
@@ -221,7 +222,7 @@ class JsonlWriter:
         except OSError:
             log_failure(self._log, "jsonl close failed", path=str(self.path))
 
-    def __enter__(self) -> "JsonlWriter":
+    def __enter__(self) -> JsonlWriter:
         return self
 
     def __exit__(self, *_exc: Any) -> None:

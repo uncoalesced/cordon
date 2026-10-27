@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from features.wrapper import sampler as sampler_module
-from features.wrapper.sampler import AGENT_PROCESS_NAMES, TreeSampler, resolve_agent_root, run_sampler, stop_file
-from features.wrapper.schema import SAMPLES_FILENAME, JsonlWriter, read_jsonl
+from cordon.wrapper import sampler as sampler_module
+from cordon.wrapper.sampler import AGENT_PROCESS_NAMES, TreeSampler, resolve_agent_root, run_sampler, stop_file
+from cordon.wrapper.schema import SAMPLES_FILENAME, JsonlWriter, read_jsonl
 
 
 @pytest.mark.parametrize(
@@ -137,7 +137,7 @@ def chain(*links):
     return procs.__getitem__, parent.pid
 
 
-HOOK = ("python3", ["python3", "-m", "features.wrapper.cli", "hook"])
+HOOK = ("python3", ["python3", "-m", "cordon.wrapper.cli", "hook"])
 SH = ("sh", ["/bin/sh", "-c", "cordon hook"])
 
 
@@ -146,8 +146,13 @@ SH = ("sh", ["/bin/sh", "-c", "cordon hook"])
     [
         # Linux npm install, a node MCP server nested between claude and the hook's shell.
         (
-            [("bash", ["bash"]), ("node", ["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"]),
-             ("node", ["node", "/home/u/mcp/server.js"]), SH, HOOK],
+            [
+                ("bash", ["bash"]),
+                ("node", ["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"]),
+                ("node", ["node", "/home/u/mcp/server.js"]),
+                SH,
+                HOOK,
+            ],
             101,
         ),
         # Native claude binary, process named after its version file behind a `claude` symlink.
@@ -212,7 +217,7 @@ def test_parse_pss_reads_smaps_rollup():
 def test_unique_bytes_per_os(tmp_path: Path, monkeypatch):
     from types import SimpleNamespace
 
-    from features import host
+    from cordon import host
 
     (tmp_path / "7").mkdir()
     (tmp_path / "7" / "smaps_rollup").write_text("Pss: 10 kB\n")
@@ -301,6 +306,7 @@ def test_pid_file_round_trip(run_dir: Path):
     path.write_text("garbage")
     assert sampler_module.read_pid_file(path) is None
 
+
 def test_walk_stops_below_init_and_the_macos_kernel():
     # macOS: launchd (pid 1) has the kernel (pid 0) as parent; neither may become the agent root.
     kernel = FakeProc(0, "kernel_task", [])
@@ -316,10 +322,10 @@ def test_sampler_records_young_children_including_cordons_own(tmp_path):
     import subprocess
     import sys
 
-    from features.wrapper.schema import JsonlWriter, read_jsonl
+    from cordon.wrapper.schema import JsonlWriter, read_jsonl
 
     tool = subprocess.Popen([sys.executable, "-c", "import time; b=b'x'*(30<<20); time.sleep(5)"])
-    own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)", "features.wrapper.cli"])
+    own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)", "cordon.wrapper.cli"])
     try:
         with JsonlWriter(tmp_path / "procs.jsonl") as procs:
             sampler = TreeSampler(root_pid=os.getpid(), interval=0.05, procs_writer=procs)

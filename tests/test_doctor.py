@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from features import host
-from features.wrapper import doctor
-from features.wrapper.cli import _hook_command, main
+from cordon import host
+from cordon.wrapper import doctor
+from cordon.wrapper.cli import _hook_command, main
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def test_doctor_fails_when_the_binary_is_not_executable(tmp_path: Path, monkeypa
 
 
 def test_installed_check_finds_the_hook_after_install(tmp_path: Path):
-    from features.wrapper.cli import install_hook_command
+    from cordon.wrapper.cli import install_hook_command
 
     command = install_hook_command("claude-code", "project")
     assert doctor.check_installed("claude-code", "project", str(tmp_path), command).status == doctor.WARN
@@ -68,9 +68,9 @@ def test_installed_check_finds_the_hook_after_install(tmp_path: Path):
 
 
 def test_roundtrip_reports_a_failing_command(tmp_path: Path):
-    result = doctor.check_roundtrip(f"{host.shell_quote(sys.executable)} -c \"raise SystemExit(3)\"", tmp_path)
+    result = doctor.check_roundtrip(f'{host.shell_quote(sys.executable)} -c "raise SystemExit(3)"', tmp_path)
     assert result.status == doctor.FAIL and "exit 3" in result.detail
-    silent = doctor.check_roundtrip(f"{host.shell_quote(sys.executable)} -c \"pass\"", tmp_path)
+    silent = doctor.check_roundtrip(f'{host.shell_quote(sys.executable)} -c "pass"', tmp_path)
     assert silent.status == doctor.FAIL and "no markers" in silent.detail
 
 

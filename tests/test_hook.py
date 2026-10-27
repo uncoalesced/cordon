@@ -12,13 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from features import host
-from features.wrapper import hook as hook_module
-from features.wrapper.hook import spawn_finalize as real_spawn_finalize
-from features.wrapper.hook import spawn_sampler as real_spawn_sampler
-from features.wrapper.reduce import reduce_run
-from features.wrapper.sampler import read_pid_file, stop_file, write_pid_file
-from features.wrapper.schema import (
+from cordon import host
+from cordon.wrapper import hook as hook_module
+from cordon.wrapper.hook import spawn_finalize as real_spawn_finalize
+from cordon.wrapper.hook import spawn_sampler as real_spawn_sampler
+from cordon.wrapper.reduce import reduce_run
+from cordon.wrapper.sampler import read_pid_file, stop_file, write_pid_file
+from cordon.wrapper.schema import (
     EVENT_SESSION_END,
     EVENT_SESSION_START,
     EVENT_TOOL_END,
@@ -67,9 +67,7 @@ def test_pre_tool_use_writes_a_start_marker(tmp_path: Path):
 def test_pre_and_post_share_a_call_key(tmp_path: Path):
     payload = {"tool_name": "Bash", "tool_input": {"command": "pytest"}}
     pre = hook_module.handle(_payload("PreToolUse", **payload), run_root=tmp_path)
-    post = hook_module.handle(
-        _payload("PostToolUse", **payload, tool_response={"exit_code": 0}), run_root=tmp_path
-    )
+    post = hook_module.handle(_payload("PostToolUse", **payload, tool_response={"exit_code": 0}), run_root=tmp_path)
     assert pre.call_key == post.call_key
     assert post.event == EVENT_TOOL_END
     assert post.exit_status == "0"
@@ -144,9 +142,7 @@ def test_exit_status_extraction(response, expected):
     ],
 )
 def test_every_agents_event_names_map_to_the_right_marker(tmp_path: Path, event, expected_marker_event):
-    marker = hook_module.handle(
-        _payload(event, tool_name="Bash", tool_input={"command": "x"}), run_root=tmp_path
-    )
+    marker = hook_module.handle(_payload(event, tool_name="Bash", tool_input={"command": "x"}), run_root=tmp_path)
     assert marker.event == expected_marker_event
 
 
@@ -316,7 +312,7 @@ def test_spawn_finalize_survives_a_failed_spawn(run_dir: Path, monkeypatch):
 
 
 def test_agent_pid_is_cached_after_the_first_event(tmp_path: Path, monkeypatch):
-    from features.wrapper import sampler as sampler_module
+    from cordon.wrapper import sampler as sampler_module
 
     walks = []
     monkeypatch.setattr(sampler_module, "resolve_agent_root", lambda: walks.append(1) or os.getpid())
@@ -328,12 +324,13 @@ def test_agent_pid_is_cached_after_the_first_event(tmp_path: Path, monkeypatch):
 
 
 def test_stale_agent_pid_cache_is_re_resolved(tmp_path: Path, monkeypatch):
-    from features.wrapper import sampler as sampler_module
+    from cordon.wrapper import sampler as sampler_module
 
     (tmp_path / SESSION).mkdir()
     (tmp_path / SESSION / "agent.pid").write_text(f"{os.getpid()} 1.0", encoding="utf-8")
     monkeypatch.setattr(sampler_module, "resolve_agent_root", lambda: 4321)
     assert hook_module.handle(_payload("PreToolUse", tool_name="Bash"), run_root=tmp_path).agent_pid == 4321
+
 
 def test_source_checkout_detection(tmp_path: Path):
     assert hook_module.is_source_checkout()  # this repo
@@ -356,7 +353,7 @@ def test_default_run_root_uses_the_user_data_dir_when_installed(monkeypatch, tmp
 
 
 def test_hook_run_root_flag_beats_the_env(monkeypatch, tmp_path: Path):
-    from features.wrapper.cli import main as cli_main
+    from cordon.wrapper.cli import main as cli_main
 
     monkeypatch.setenv(hook_module.ENV_RUN_ROOT, str(tmp_path / "env"))
     monkeypatch.setenv("CORDON_AGENT_PID", str(os.getpid()))

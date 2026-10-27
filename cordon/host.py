@@ -70,7 +70,11 @@ def detach_kwargs(stderr: IO[Any] | int | None = None, os_name: str | None = Non
         "stderr": subprocess.DEVNULL if stderr is None else stderr,
     }
     if (os.name if os_name is None else os_name) == "nt":
-        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # Not DETACHED_PROCESS: a venv's python.exe is a redirector that starts the base
+        # python.exe as a child, and a console child of a console-less parent gets a new,
+        # visible console window. CREATE_NO_WINDOW gives a hidden console that every
+        # descendant inherits, so nothing ever pops up.
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         # New session: no controlling terminal, so closing the agent's terminal (SIGHUP) or
         # Ctrl-C in it (SIGINT to the foreground group) never reaches the sampler.

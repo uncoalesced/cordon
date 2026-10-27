@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from features.control.intent import (
+from cordon.control.intent import (
     CPU_TIER_WEIGHT,
     ENV_HINT,
     MEMORY_TIER_FLOOR_MB,
@@ -119,19 +119,14 @@ def test_freeze_and_oom_always_report_regardless_of_stall():
 
 def test_repeated_limits_on_the_same_command_escalate_the_wording():
     policy = FeedbackPolicy()
-    messages = [
-        policy.evaluate("pytest tests/", Intent(), stall_s=1.0, duration_s=2.0, peak_memory_mb=900.0)
-        for _ in range(3)
-    ]
+    messages = [policy.evaluate("pytest tests/", Intent(), stall_s=1.0, duration_s=2.0, peak_memory_mb=900.0) for _ in range(3)]
     assert "warning number" not in messages[0]
     assert "warning number 3" in messages[2]
 
 
 def test_an_unobservable_backend_never_speaks():
     policy = FeedbackPolicy()
-    assert policy.evaluate(
-        "pytest", Intent(), stall_s=9.0, duration_s=1.0, peak_memory_mb=999.0, observable=False
-    ) is None
+    assert policy.evaluate("pytest", Intent(), stall_s=9.0, duration_s=1.0, peak_memory_mb=999.0, observable=False) is None
 
 
 def test_feedback_names_the_next_tier_up():

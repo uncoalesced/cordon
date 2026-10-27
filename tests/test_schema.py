@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from features.wrapper.schema import (
+from cordon.wrapper.schema import (
     JsonlWriter,
     Marker,
     Sample,
@@ -78,20 +78,32 @@ def test_append_jsonl_creates_parents(run_dir: Path):
 
 def test_toolcall_record_keeps_spec_field_names():
     record = ToolCallRecord(
-        task_id="t", tool_type="Bash", command="pytest",
-        start_ts=1.0, end_ts=2.0,
-        peak_memory_mb=10.0, avg_memory_mb=5.0, avg_cpu_pct=1.0,
+        task_id="t",
+        tool_type="Bash",
+        command="pytest",
+        start_ts=1.0,
+        end_ts=2.0,
+        peak_memory_mb=10.0,
+        avg_memory_mb=5.0,
+        avg_cpu_pct=1.0,
     )
     payload = record.to_dict()
     for key in (
-        "task_id", "tool_type", "command", "start_ts", "end_ts",
-        "peak_memory_mb", "avg_memory_mb", "avg_cpu_pct", "samples",
+        "task_id",
+        "tool_type",
+        "command",
+        "start_ts",
+        "end_ts",
+        "peak_memory_mb",
+        "avg_memory_mb",
+        "avg_cpu_pct",
+        "samples",
     ):
         assert key in payload
 
 
 def test_sample_optional_memory_fields_round_trip_and_tolerate_absence():
-    from features.wrapper.schema import Sample
+    from cordon.wrapper.schema import Sample
 
     old = Sample.from_dict({"t": 1, "mem_mb": 2, "cpu_pct": 3})
     assert old.mem_mb_unique is None and old.cg_mem_mb is None

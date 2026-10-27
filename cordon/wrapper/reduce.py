@@ -5,13 +5,13 @@ from __future__ import annotations
 import bisect
 import json
 import statistics
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from features.wrapper.logging_setup import get_logger, log_failure
-from features.wrapper.schema import (
-    is_cordon_cmd,
+from cordon.wrapper.logging_setup import get_logger, log_failure
+from cordon.wrapper.schema import (
     EVENT_TOOL_END,
     EVENT_TOOL_START,
     MARKERS_FILENAME,
@@ -22,6 +22,7 @@ from features.wrapper.schema import (
     Marker,
     Sample,
     ToolCallRecord,
+    is_cordon_cmd,
     read_jsonl,
 )
 
@@ -105,7 +106,9 @@ def slice_samples(samples: list[Sample], times: list[float], start_ts: float, en
     return samples[lo:hi]
 
 
-def pre_call_level(samples: list[Sample], times: list[float], start_ts: float, window_s: float = PRE_CALL_WINDOW_S) -> tuple[float, float] | None:
+def pre_call_level(
+    samples: list[Sample], times: list[float], start_ts: float, window_s: float = PRE_CALL_WINDOW_S
+) -> tuple[float, float] | None:
     """(memory MB, CPU %) of the agent tree just before a call starts: medians over the last
     window_s seconds, else the last sample before start. None when nothing precedes the call."""
     hi = bisect.bisect_left(times, start_ts)
@@ -120,12 +123,14 @@ def load_procs(run_dir: Path) -> list[dict[str, Any]]:
     procs = []
     for raw in read_jsonl(Path(run_dir) / PROCS_FILENAME, quiet=True):
         try:
-            procs.append({
-                "pid": int(raw["pid"]),
-                "ppid": int(raw.get("ppid", -1)),
-                "created": float(raw["created"]),
-                "cmd": str(raw.get("cmd", "")),
-            })
+            procs.append(
+                {
+                    "pid": int(raw["pid"]),
+                    "ppid": int(raw.get("ppid", -1)),
+                    "created": float(raw["created"]),
+                    "cmd": str(raw.get("cmd", "")),
+                }
+            )
         except (KeyError, TypeError, ValueError):
             continue
     procs.sort(key=lambda p: p["created"])
@@ -360,8 +365,6 @@ def _write_outputs(run_dir: Path, result: ReduceResult) -> None:
             writer.write(record)
 
     try:
-        (run_dir / SUMMARY_FILENAME).write_text(
-            json.dumps(result.to_dict(), indent=2, sort_keys=True), encoding="utf-8"
-        )
+        (run_dir / SUMMARY_FILENAME).write_text(json.dumps(result.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
     except OSError:
         log_failure(log, "could not write run summary", run_dir=str(run_dir))
