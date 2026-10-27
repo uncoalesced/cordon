@@ -14,8 +14,13 @@ Baseline 2026-10-27 (origin/main f30002c): 492 passed, 2 skipped, coverage 92%. 
 - [x] G2 no console windows from detached sampler/finalize on Windows
   CHECK: pytest tests/test_host.py -k console
   EVIDENCE: CREATE_NO_WINDOW replaces DETACHED_PROCESS; grandchild of popen_detached sees a hidden console (IsWindowVisible=0)
-- [ ] G3 one per-user daemon replaces per-session sampler spawns (no process per session start)
-- [ ] G4 hook median <= 80 ms (scripts/bench_hook.py --max-median-ms 80)
+- [x] G3 one per-user daemon replaces per-session sampler spawns (no process per session start)
+  CHECK: pytest tests/test_daemon.py; live: `cordon serve --ensure` x2 then GET /health
+  EVIDENCE: 2026-10-27 live on Windows: health {"sessions":2}, one python pid, MainWindowHandle 0;
+  40 Pre/Post POSTs + SessionEnd -> 43 markers, samples, report.md written in-process (no finalize spawn)
+- [~] G4 hook median <= 80 ms
+  EVIDENCE: Claude Code http transport: 3.3 ms median, p90 20 ms (40 loopback POSTs).
+  ensure (once per session): 540 ms warm. Command transport (codex/gemini/cursor/hermes) still ~330 ms: open.
 - [ ] G5 markers.jsonl: 0 torn lines with 8 writers x 500 appends
 - [ ] G6 background training trees not charged to cat/nvidia-smi (re-reduce Parentheses 92a15925)
 - [ ] G7 runs without SessionEnd get finalized (`cordon finalize --stale`), Parentheses backfilled

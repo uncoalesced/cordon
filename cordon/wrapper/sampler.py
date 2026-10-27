@@ -539,7 +539,9 @@ def run_sampler(
     root_pid: int,
     interval: float = DEFAULT_INTERVAL_S,
     max_duration_s: float | None = None,
+    stop_event: Any = None,
 ) -> int:
+    """Sample until STOP, idle, agent exit, or (daemon threads) stop_event.set()."""
     run_dir = Path(run_dir)
     marker = stop_file(run_dir)
     idle_limit = env_float(ENV_IDLE_STOP, DEFAULT_IDLE_STOP_S)
@@ -547,7 +549,7 @@ def run_sampler(
     signalled: list[int] = []
     log = get_logger("sampler")
 
-    if host.OS != host.WINDOWS:
+    if host.OS != host.WINDOWS and stop_event is None:
 
         def _on_signal(signum: int, _frame: Any) -> None:
             signalled.append(signum)
@@ -563,6 +565,8 @@ def run_sampler(
     def should_stop() -> bool:
         if signalled:
             log.info("sampler stopping: signal %s", signalled[0])
+            return True
+        if stop_event is not None and stop_event.is_set():
             return True
         if marker.exists():
             return True

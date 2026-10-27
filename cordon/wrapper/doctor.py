@@ -65,7 +65,8 @@ def _commands_in(node: Any) -> set[str]:
     return found
 
 
-def check_installed(agent: str, scope: str, target: str, command: str) -> CheckResult:
+def check_installed(agent: str, scope: str, target: str, command: str, alternatives: tuple[str, ...] = ()) -> CheckResult:
+    """command: the command-transport hook; alternatives: other installs that are just as valid (the daemon's ensure)."""
     from cordon.wrapper.cli import install_hooks_hint
 
     path = agents.settings_path(agent, agents.install_target(scope, target).resolve())
@@ -85,6 +86,8 @@ def check_installed(agent: str, scope: str, target: str, command: str) -> CheckR
     commands = _commands_in(document)
     if command in commands:
         return CheckResult("installed", PASS, f"{agent} hook present in {path}")
+    if any(alt in commands for alt in alternatives):
+        return CheckResult("installed", PASS, f"{agent} daemon hooks present in {path} (http transport)")
     stale = sorted(c for c in commands if "cordon" in c and " hook" in c)
     detail = f"{path} has a different cordon hook ({stale[0]})" if stale else f"no cordon hook in {path}"
     return CheckResult("installed", WARN, detail, fix)
@@ -214,6 +217,44 @@ def check_run_root(root: Path) -> CheckResult:
     return CheckResult("run_root", status, f"{root}: {len(rows)} runs, {live} live samplers", fix)
 
 
+def check_daemon(scratch: Path) -> CheckResult:
+    """A private daemon on a free port takes a full session over loopback and writes report.md."""
+    import threading
+
+    from cordon.wrapper import daemon as daemon_module
+    from cordon.wrapper.finalize import report_path
+
+    instance = daemon_module.Daemon(scratch, interval=0.05)
+    server = daemon_module.make_server(instance, 0)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True).start()
+    try:
+        session = "doctor-daemon"
+        events = [
+            {"hook_event_name": "SessionStart", "session_id": session},
+            {"hook_event_name": "PreToolUse", "session_id": session, "tool_name": "Bash", "tool_use_id": "d1"},
+            {"hook_event_name": "PostToolUse", "session_id": session, "tool_name": "Bash", "tool_use_id": "d1"},
+            {"hook_event_name": "SessionEnd", "session_id": session},
+        ]
+        for i, payload in enumerate(events):
+            if not daemon_module.post_hook(payload, port, scratch, agent_pid=os.getpid() if i == 0 else None):
+                return CheckResult("daemon", FAIL, f"loopback POST to 127.0.0.1:{port} failed", "check a firewall on loopback")
+            time.sleep(0.1)
+        deadline = time.monotonic() + 15
+        while not report_path(scratch / session).exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if not report_path(scratch / session).exists():
+            return CheckResult("daemon", FAIL, "daemon took events but wrote no report.md", "read the daemon log in the data dir")
+    finally:
+        server.shutdown()
+        server.server_close()
+    running = daemon_module.health()
+    where = (
+        f"live on port {daemon_module.port()} (pid {running['pid']})" if running else "not running; next SessionStart starts it"
+    )
+    return CheckResult("daemon", PASS, f"loopback round trip ok; daemon {where}")
+
+
 def check_enforcement() -> CheckResult:
     from cordon.control import probe
 
@@ -231,11 +272,12 @@ def _guarded(name: str, check: Callable[[], CheckResult]) -> CheckResult:
 
 
 def run_checks(agent: str = agents.CLAUDE_CODE, scope: str = agents.SCOPE_PROJECT, target: str = ".") -> list[CheckResult]:
-    from cordon.wrapper.cli import _hook_command, install_hook_command, user_run_root
+    from cordon.wrapper.cli import _hook_command, install_hook_command, install_run_root, user_run_root
     from cordon.wrapper.hook import default_run_root
 
     user_global = agents.is_user_global(agent, scope)
     installed = install_hook_command(agent, scope)
+    ensure = _hook_command(install_run_root(agent, scope, Path(target)), subcommand="serve --ensure")
     real_root = user_run_root() if user_global else default_run_root()
 
     scratch = Path(tempfile.mkdtemp(prefix="cordon-doctor-"))
@@ -246,7 +288,7 @@ def run_checks(agent: str = agents.CLAUDE_CODE, scope: str = agents.SCOPE_PROJEC
         run_dir = scratch / DOCTOR_SESSION
         results = [
             _guarded("binary", check_binary),
-            _guarded("installed", lambda: check_installed(agent, scope, target, installed)),
+            _guarded("installed", lambda: check_installed(agent, scope, target, installed, (ensure,))),
             _guarded("roundtrip", lambda: check_roundtrip(probe_command, scratch)),
             _guarded("agent_root", check_agent_root),
         ]
@@ -254,6 +296,7 @@ def run_checks(agent: str = agents.CLAUDE_CODE, scope: str = agents.SCOPE_PROJEC
         results += [
             _guarded("sampler", lambda: check_sampler(run_dir)),
             _guarded("finalize", lambda: check_finalize(run_dir)),
+            _guarded("daemon", lambda: check_daemon(scratch / "daemon")),
             _guarded("run_root", lambda: check_run_root(real_root)),
             _guarded("enforcement", check_enforcement),
         ]

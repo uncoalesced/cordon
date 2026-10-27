@@ -167,7 +167,9 @@ class ToolCallRecord:
         )
 
 
-_CORDON_CMD = re.compile(r"features\.wrapper\.cli|cordon(?:\.exe)?['\"]?\s+(?:hook|sample|finalize)\b", re.IGNORECASE)
+_CORDON_CMD = re.compile(
+    r"(?:features|cordon)\.wrapper\.cli|cordon(?:-cli)?(?:\.exe)?['\"]?\s+(?:hook|sample|finalize|serve)\b", re.IGNORECASE
+)
 
 
 def is_cordon_cmd(cmd: str) -> bool:

@@ -190,15 +190,79 @@ def spawn_sampler(run_dir: Path, agent_pid: int, interval: float) -> int | None:
     return proc.pid
 
 
+def session_id_of(payload: dict[str, Any]) -> str:
+    # Cursor's tool hooks key session identity as "conversation_id" instead of "session_id"
+    # (its own sessionStart/sessionEnd events use "session_id", so both are checked here).
+    return str(payload.get("session_id") or payload.get("conversation_id") or _UNKNOWN_SESSION)
+
+
+def event_kind(payload: dict[str, Any]) -> str | None:
+    """Which lifecycle moment a payload is, whatever the agent calls it: start/pre/post/end."""
+    name = str(payload.get("hook_event_name", ""))
+    for kind, names in (("start", _START_EVENTS), ("pre", _PRE_EVENTS), ("post", _POST_EVENTS), ("end", _END_EVENTS)):
+        if name in names:
+            return kind
+    return None
+
+
+def build_marker(payload: dict[str, Any], now: float, agent_pid: int, spawn_ts: float = 0.0) -> Marker | None:
+    """The marker one hook payload records, or None for an event Cordon does not track."""
+    kind = event_kind(payload)
+    session_id = session_id_of(payload)
+    tool_name = str(payload.get("tool_name", ""))
+    tool_input = payload.get("tool_input", {})
+    # Hermes nests the tool-call id in "extra" instead of sending it top-level.
+    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+    tool_use_id = str(payload.get("tool_use_id") or extra.get("tool_call_id") or "")
+    cwd = str(payload.get("cwd", ""))
+
+    if kind == "start":
+        # A session_start's command is how it started (startup/resume/clear/compact), which is
+        # what tells a real session from the many short ones that never call a tool.
+        return Marker(
+            event=EVENT_SESSION_START,
+            ts=now,
+            session_id=session_id,
+            cwd=cwd,
+            agent_pid=agent_pid,
+            command=str(payload.get("source") or ""),
+        )
+    if kind == "pre":
+        return Marker(
+            event=EVENT_TOOL_START,
+            ts=now,
+            session_id=session_id,
+            call_key=call_key_for(session_id, tool_name, tool_input, tool_use_id),
+            tool_type=tool_name,
+            command=summarize_command(tool_name, tool_input),
+            cwd=cwd,
+            agent_pid=agent_pid,
+        )
+    if kind == "post":
+        return Marker(
+            event=EVENT_TOOL_END,
+            ts=now,
+            session_id=session_id,
+            call_key=call_key_for(session_id, tool_name, tool_input, tool_use_id),
+            tool_type=tool_name,
+            command=summarize_command(tool_name, tool_input),
+            cwd=cwd,
+            exit_status=_exit_status(_response_source(payload, extra)),
+            agent_pid=agent_pid,
+            spawn_ts=spawn_ts,
+        )
+    if kind == "end":
+        return Marker(event=EVENT_SESSION_END, ts=now, session_id=session_id, agent_pid=agent_pid)
+    return None
+
+
 def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | None = None) -> Marker | None:
     log = get_logger("hook")
     now = time.time() if now is None else now
     run_root = default_run_root() if run_root is None else Path(run_root)
 
-    event_name = str(payload.get("hook_event_name", ""))
-    # Cursor's tool hooks key session identity as "conversation_id" instead of "session_id"
-    # (its own sessionStart/sessionEnd events use "session_id", so both are checked here).
-    session_id = str(payload.get("session_id") or payload.get("conversation_id") or _UNKNOWN_SESSION)
+    kind = event_kind(payload)
+    session_id = session_id_of(payload)
     run_dir = run_root / session_id
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -207,62 +271,22 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
         return None
     configure(log_path=run_dir / RUN_LOG_FILENAME, to_stderr=False)
 
-    tool_name = str(payload.get("tool_name", ""))
-    tool_input = payload.get("tool_input", {})
-    # Hermes nests the tool-call id in "extra" instead of sending it top-level.
-    extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
-    tool_use_id = str(payload.get("tool_use_id") or extra.get("tool_call_id") or "")
+    if kind is None:
+        log.warning("ignoring unrecognised hook event | event=%r session=%s", payload.get("hook_event_name"), session_id)
+        return None
+
     # Start/Pre must import psutil anyway (sampler liveness), so they validate the cache;
     # Post/End trust it and stay psutil-free.
-    starts = event_name in _START_EVENTS or event_name in _PRE_EVENTS
+    starts = kind in ("start", "pre")
     agent_pid = cached_agent_root(run_dir, validate=starts)
+    marker = build_marker(payload, now, agent_pid, spawn_ts=_spawn_ts() if kind == "post" else 0.0)
+    assert marker is not None
 
-    if event_name in _START_EVENTS:
-        marker = Marker(
-            event=EVENT_SESSION_START,
-            ts=now,
-            session_id=session_id,
-            cwd=str(payload.get("cwd", "")),
-            agent_pid=agent_pid,
-        )
+    if starts:
         spawn_sampler(run_dir, agent_pid, _interval())
-    elif event_name in _PRE_EVENTS:
-        marker = Marker(
-            event=EVENT_TOOL_START,
-            ts=now,
-            session_id=session_id,
-            call_key=call_key_for(session_id, tool_name, tool_input, tool_use_id),
-            tool_type=tool_name,
-            command=summarize_command(tool_name, tool_input),
-            cwd=str(payload.get("cwd", "")),
-            agent_pid=agent_pid,
-        )
-        spawn_sampler(run_dir, agent_pid, _interval())
-    elif event_name in _POST_EVENTS:
-        marker = Marker(
-            event=EVENT_TOOL_END,
-            ts=now,
-            session_id=session_id,
-            call_key=call_key_for(session_id, tool_name, tool_input, tool_use_id),
-            tool_type=tool_name,
-            command=summarize_command(tool_name, tool_input),
-            cwd=str(payload.get("cwd", "")),
-            exit_status=_exit_status(_response_source(payload, extra)),
-            agent_pid=agent_pid,
-            spawn_ts=_spawn_ts(),
-        )
-    elif event_name in _END_EVENTS:
-        marker = Marker(
-            event=EVENT_SESSION_END,
-            ts=now,
-            session_id=session_id,
-            agent_pid=agent_pid,
-        )
+    elif kind == "end":
         stop_file(run_dir).touch()
         spawn_finalize(run_dir)
-    else:
-        log.warning("ignoring unrecognised hook event | event=%r session=%s", event_name, session_id)
-        return None
 
     if starts:
         # Only start markers' overhead is reported (reduce reads it from the tool_start marker).

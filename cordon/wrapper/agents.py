@@ -76,26 +76,58 @@ def codex_config_path(target: Path) -> Path:
     return Path(target) / ".codex" / "config.toml"
 
 
+TRANSPORT_HTTP = "http"
+TRANSPORT_COMMAND = "command"
+TRANSPORTS = (TRANSPORT_HTTP, TRANSPORT_COMMAND)
+# Agents whose hook system can POST events to a URL instead of running a command.
+HTTP_AGENTS = {CLAUDE_CODE}
+# A hook that cannot reach the daemon must never stall the agent for the 600 s default.
+HTTP_HOOK_TIMEOUT_S = 5
+ENSURE_TIMEOUT_S = 15
+
+
 def nested_settings(agent: str, hook_command: str) -> dict[str, Any]:
     entry = {"matcher": "*", "hooks": [{"type": "command", "command": hook_command}]}
     return {"hooks": {event: [dict(entry)] for event in NESTED_EVENTS[agent]}}
 
 
+def http_settings(agent: str, ensure_command: str, url: str) -> dict[str, Any]:
+    """SessionStart starts/registers with the daemon; every other event is a loopback POST, no process."""
+    start, *rest = NESTED_EVENTS[agent]
+    hooks: dict[str, Any] = {
+        start: [{"matcher": "*", "hooks": [{"type": "command", "command": ensure_command, "timeout": ENSURE_TIMEOUT_S}]}]
+    }
+    for event in rest:
+        hooks[event] = [{"matcher": "*", "hooks": [{"type": "http", "url": url, "timeout": HTTP_HOOK_TIMEOUT_S}]}]
+    return {"hooks": hooks}
+
+
+def is_cordon_hook(hook: Any) -> bool:
+    """A hook entry Cordon installed: its command runs cordon, or it posts to the daemon's /hook."""
+    from cordon.wrapper.schema import is_cordon_cmd
+
+    if not isinstance(hook, dict):
+        return False
+    if hook.get("type") == "http":
+        url = str(hook.get("url", ""))
+        return url.startswith(("http://127.0.0.1:", "http://localhost:")) and "/hook" in url
+    return is_cordon_cmd(str(hook.get("command", "")))
+
+
 def merge_nested(existing: dict[str, Any], additions: dict[str, Any]) -> dict[str, Any]:
+    """Add Cordon's hooks, replacing any it installed before (command <-> http) so nothing records twice."""
     merged = dict(existing)
     hooks = dict(merged.get("hooks") or {})
     for event, entries in additions["hooks"].items():
-        current = list(hooks.get(event) or [])
-        commands = {
-            h.get("command")
-            for group in current
-            if isinstance(group, dict)
-            for h in (group.get("hooks") or [])
-            if isinstance(h, dict)
-        }
-        for entry in entries:
-            if entry["hooks"][0]["command"] not in commands:
-                current.append(entry)
+        current = []
+        for group in hooks.get(event) or []:
+            if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+                kept = [h for h in group["hooks"] if not is_cordon_hook(h)]
+                if not kept:
+                    continue
+                group = {**group, "hooks": kept}
+            current.append(group)
+        current.extend(entries)
         hooks[event] = current
     merged["hooks"] = hooks
     return merged

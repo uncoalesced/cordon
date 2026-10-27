@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from cordon.wrapper import agents
 from cordon.wrapper.cli import _hook_command, build_parser, main
@@ -318,12 +319,41 @@ def test_install_hooks_user_scope_writes_every_agent_under_home(tmp_path: Path, 
     for path in expected:
         assert path.exists(), path
     settings = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
-    command = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-    assert command.endswith(host_quote(str(user_runs())))
+    ensure = settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert ensure.endswith(host_quote(str(user_runs())))
+    post = settings["hooks"]["PostToolUse"][0]["hooks"][0]
+    assert post["type"] == "http"
+    assert parse_qs(urlsplit(post["url"]).query)["run_root"] == [str(user_runs())]
+    codex = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    assert codex["hooks"]["PostToolUse"][0]["hooks"][0]["command"].endswith(host_quote(str(user_runs())))
 
 
-def test_install_hooks_project_scope_has_no_run_root(tmp_path: Path):
+def test_install_hooks_claude_code_defaults_to_the_quiet_daemon(tmp_path: Path):
     assert main(["install-hooks", "--target", str(tmp_path), "--write"]) == 0
+    hooks = json.loads((tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8"))["hooks"]
+    start = hooks["SessionStart"][0]["hooks"][0]
+    assert start["type"] == "command" and " serve --ensure" in start["command"]
+    for event in ("PreToolUse", "PostToolUse", "SessionEnd"):
+        hook = hooks[event][0]["hooks"][0]
+        assert hook["type"] == "http"
+        assert hook["url"].startswith("http://127.0.0.1:") and urlsplit(hook["url"]).path == "/hook"
+        assert hook["timeout"] <= 10  # an unreachable daemon must not stall the agent
+
+
+def test_install_hooks_switching_transport_replaces_instead_of_doubling(tmp_path: Path):
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    other = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]}
+    settings_path.write_text(json.dumps({"hooks": {"PreToolUse": [other]}}), encoding="utf-8")
+    assert main(["install-hooks", "--target", str(tmp_path), "--transport", "command", "--write"]) == 0
+    assert main(["install-hooks", "--target", str(tmp_path), "--write"]) == 0
+    pre = json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    assert pre[0] == other
+    assert [h["type"] for group in pre[1:] for h in group["hooks"]] == ["http"]
+
+
+def test_install_hooks_project_scope_command_transport_has_no_run_root(tmp_path: Path):
+    assert main(["install-hooks", "--target", str(tmp_path), "--transport", "command", "--write"]) == 0
     assert "--run-root" not in (tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8")
 
 

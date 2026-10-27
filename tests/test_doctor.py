@@ -57,12 +57,16 @@ def test_doctor_fails_when_the_binary_is_not_executable(tmp_path: Path, monkeypa
 
 
 def test_installed_check_finds_the_hook_after_install(tmp_path: Path):
-    from cordon.wrapper.cli import install_hook_command
+    from cordon.wrapper.cli import _hook_command, install_hook_command, install_run_root
 
     command = install_hook_command("claude-code", "project")
+    ensure = _hook_command(install_run_root("claude-code", "project", tmp_path), subcommand="serve --ensure")
     assert doctor.check_installed("claude-code", "project", str(tmp_path), command).status == doctor.WARN
-    assert main(["install-hooks", "--target", str(tmp_path), "--write"]) == 0
+    assert main(["install-hooks", "--target", str(tmp_path), "--transport", "command", "--write"]) == 0
     assert doctor.check_installed("claude-code", "project", str(tmp_path), command).status == doctor.PASS
+    assert main(["install-hooks", "--target", str(tmp_path), "--write"]) == 0
+    assert doctor.check_installed("claude-code", "project", str(tmp_path), command).status == doctor.WARN
+    assert doctor.check_installed("claude-code", "project", str(tmp_path), command, (ensure,)).status == doctor.PASS
     (tmp_path / ".claude" / "settings.json").write_text("{ broken", encoding="utf-8")
     assert doctor.check_installed("claude-code", "project", str(tmp_path), command).status == doctor.FAIL
 

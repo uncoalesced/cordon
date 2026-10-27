@@ -21,15 +21,15 @@ from cordon.wrapper.schema import DEFAULT_INTERVAL_S, RUN_LOG_FILENAME
 #   See docs/stage2-host-audit.md.
 
 
-def _hook_command(run_root: Path | None = None, os_name: str | None = None) -> str:
-    """The exact string an agent runs through sh -c / cmd /c for every hook event."""
+def _hook_command(run_root: Path | None = None, os_name: str | None = None, subcommand: str = "hook") -> str:
+    """The exact string an agent runs through sh -c / cmd /c for a hook event."""
     script = host.venv_script("cordon", os_name=os_name)
     if host.is_executable(script, os_name=os_name):
-        command = f"{host.shell_quote(str(script), os_name=os_name)} hook"
+        command = f"{host.shell_quote(str(script), os_name=os_name)} {subcommand}"
     else:
         if script.exists():
             get_logger("cli").warning("%s is not executable, hooking via the interpreter instead", script)
-        command = f"{host.shell_quote(sys.executable, os_name=os_name)} -m cordon.wrapper.cli hook"
+        command = f"{host.shell_quote(sys.executable, os_name=os_name)} -m cordon.wrapper.cli {subcommand}"
     if run_root is not None:
         # A flag, not an inline `VAR=x cmd` prefix: cmd.exe has no such syntax.
         command += f" --run-root {host.shell_quote(str(run_root), os_name=os_name)}"
@@ -43,6 +43,23 @@ def user_run_root() -> Path:
 def install_hook_command(agent: str, scope: str) -> str:
     """User-global hooks fire in every repo, so their runs go to the user data dir, not the cwd."""
     return _hook_command(user_run_root() if agents.is_user_global(agent, scope) else None)
+
+
+def install_run_root(agent: str, scope: str, target: Path) -> Path:
+    """Where an http install's runs go. The daemon is shared, so the root is always spelled out."""
+    from cordon.wrapper.hook import default_run_root
+
+    # Same place the command hook would have recorded to.
+    return user_run_root() if agents.is_user_global(agent, scope) else default_run_root()
+
+
+def install_settings(agent: str, scope: str, target: Path, transport: str) -> dict[str, Any]:
+    if transport == agents.TRANSPORT_HTTP and agent in agents.HTTP_AGENTS:
+        from cordon.wrapper import daemon
+
+        run_root = install_run_root(agent, scope, target)
+        return agents.http_settings(agent, _hook_command(run_root, subcommand="serve --ensure"), daemon.hook_url(None, run_root))
+    return agents.nested_settings(agent, install_hook_command(agent, scope))
 
 
 def install_hooks_hint(agent: str, scope: str, target: str) -> str:
@@ -150,7 +167,7 @@ def cmd_install_hooks(args: argparse.Namespace) -> int:
         existing = _read_json(settings_path, log)
         if existing is None:
             return 1
-        merged = agents.merge_nested(existing, agents.nested_settings(agent, command))
+        merged = agents.merge_nested(existing, install_settings(agent, args.scope, target, args.transport))
         outputs.append((settings_path, json.dumps(merged, indent=2) + "\n"))
         if agent == agents.CODEX:
             config_path = agents.codex_config_path(target)
@@ -206,6 +223,14 @@ def cmd_hook(args: argparse.Namespace) -> int:
     from cordon.wrapper import hook as hook_module
 
     return hook_module.main(run_root=getattr(args, "run_root", None))
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from cordon.wrapper import daemon
+
+    if args.ensure:
+        return daemon.ensure(run_root=args.run_root, port_=args.port)
+    return daemon.serve(port_=args.port, run_root=Path(args.run_root) if args.run_root else None, idle_exit_s=args.idle_exit)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -406,12 +431,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=agents.SCOPE_PROJECT,
         help="project: <target>/.<agent>/...; user: ~/.<agent>/... with runs in the user data dir (hermes is always user)",
     )
+    install.add_argument(
+        "--transport",
+        choices=agents.TRANSPORTS,
+        default=agents.TRANSPORT_HTTP,
+        help="http (default, Claude Code): events POST to the quiet `cordon serve` daemon; command: one process per event",
+    )
     install.add_argument("--write", action="store_true")
     install.set_defaults(func=cmd_install_hooks)
 
     hook_parser = subparsers.add_parser("hook", help="hook entrypoint; reads one JSON payload on stdin")
     hook_parser.add_argument("--run-root", default=None, help="where runs go; beats $CORDON_RUN_ROOT")
     hook_parser.set_defaults(func=cmd_hook)
+
+    serve_parser = subparsers.add_parser(
+        "serve", help="run the quiet per-user recording daemon (http hooks post here; no window, no per-call process)"
+    )
+    serve_parser.add_argument("--port", type=int, default=None, help="loopback port (default $CORDON_PORT or 47821)")
+    serve_parser.add_argument("--run-root", default=None, help="runs for events that do not name one")
+    serve_parser.add_argument("--idle-exit", type=float, default=3600.0, help="exit after this long with no live agent")
+    serve_parser.add_argument(
+        "--ensure", action="store_true", help="SessionStart hook: start the daemon if needed and register this session"
+    )
+    serve_parser.set_defaults(func=cmd_serve)
 
     doctor_parser = subparsers.add_parser("doctor", help="check that hooks, sampler and reports work end to end")
     doctor_parser.add_argument("--agent", choices=agents.AGENT_CHOICES, default=agents.CLAUDE_CODE)
@@ -475,6 +517,14 @@ def main(argv: list[str] | None = None) -> int:
     if argv == ["hook"] or (len(argv) == 3 and argv[:2] == ["hook", "--run-root"]):
         # Hot path: runs on every tool call, so skip the parser and its imports.
         return cmd_hook(argparse.Namespace(run_root=argv[2] if len(argv) == 3 else None))
+    if argv[:2] == ["serve", "--ensure"] and len(argv) in (2, 4) and (len(argv) == 2 or argv[2] == "--run-root"):
+        # SessionStart hot path: same reason, it blocks the session from starting.
+        return cmd_serve(argparse.Namespace(ensure=True, run_root=argv[3] if len(argv) == 4 else None, port=None))
+    if argv and argv[0] in ("--version", "-V"):
+        from cordon import __version__
+
+        print(f"cordon {__version__}")
+        return 0
     args = build_parser().parse_args(argv)
     return args.func(args)
 
