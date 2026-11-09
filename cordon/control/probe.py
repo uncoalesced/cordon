@@ -304,9 +304,23 @@ def probe_advisory(os_kind: str | None = None, which: Callable[[str], str | None
         )
     if os_kind == host.LINUX:
         return Capability("advisory", True, "nice + PSS memory watchdog fallback (soft, no hard limits)")
-    return Capability(
-        "advisory", False, f"{os_kind}: no enforcement backend (out of scope); commands run unchanged under the null backend"
-    )
+    if os_kind == host.WINDOWS:
+        return Capability("advisory", False, "windows: not needed, Job Objects are used instead (see windows_job)")
+    return Capability("advisory", False, f"{os_kind}: no enforcement backend; commands run unchanged under the null backend")
+
+
+def probe_windows_job(os_kind: str | None = None) -> Capability:
+    """Windows: create a Job Object, set the limits Cordon uses, read them back, close it."""
+    os_kind = host.OS if os_kind is None else os_kind
+    if os_kind != host.WINDOWS:
+        return Capability("windows_job", False, f"{os_kind}: Job Objects are Windows only")
+    from cordon.control.windows_job import WindowsJobBackend
+
+    if WindowsJobBackend().usable():
+        return Capability(
+            "windows_job", True, "Job Objects: CPU weight + priority enforced, tree memory accounted (--hard caps it)"
+        )
+    return Capability("windows_job", False, "could not create or configure a Job Object")
 
 
 def probe_psi(path: Path = PSI_MEMORY) -> Capability:
@@ -361,6 +375,7 @@ def probe(root: Path = CGROUP2_ROOT) -> list[Capability]:
         lambda: probe_cgroup2_delegated(root),
         probe_systemd_run_user,
         probe_advisory,
+        probe_windows_job,
         probe_psi,
         probe_sched_ext,
         probe_memcg_bpf_ops,
@@ -387,6 +402,8 @@ def enforcement_tier(capabilities: list[Capability]) -> str:
         if by_name.get("sched_ext") and by_name.get("memcg_bpf_ops") and by_name.get("capabilities"):
             return "bpf"
         return "cgroup2"
+    if by_name.get("windows_job"):
+        return "job"
     if by_name.get("advisory") or by_name.get("darwin_advisory"):
         return "advisory"
     return "none"
@@ -406,8 +423,15 @@ def render(capabilities: list[Capability]) -> str:
 
 _TIER_NOTES = {
     "none": (
-        "No enforcement backend on this host (Windows is out of scope). Cordon will record what it\n"
-        "would have enforced and run the command unchanged. See docs/stage2-design.md."
+        "No enforcement backend on this host. Cordon will record what it would have enforced and\n"
+        "run the command unchanged. See docs/stage2-design.md."
+    ),
+    "job": (
+        "Windows Job Objects: each command runs in its own job, started suspended so nothing it\n"
+        "spawns escapes. CPU weight and priority are enforced by the scheduler; the tree's\n"
+        "committed memory is accounted by the kernel and over-limit time counts as stall.\n"
+        "Windows cannot throttle memory, so memory.high is watched, not enforced, unless\n"
+        "`control run --hard` sets a hard cap (allocations past it fail)."
     ),
     "advisory": (
         "Advisory only: no usable cgroup v2. CPU share maps to nice (plus taskpolicy -b for low\n"

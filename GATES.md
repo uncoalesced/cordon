@@ -45,7 +45,14 @@ Baseline 2026-10-27 (origin/main f30002c): 492 passed, 2 skipped, coverage 92%. 
 - [x] G8b failed calls paired: Claude Code PostToolUseFailure installed; old runs infer the end of
   a Bash/PowerShell call whose shell ran (exit_status "no end event"). Parentheses unpaired 989 -> 830,
   the rest are calls another PreToolUse hook blocked (Write 329, Edit 161) or denied.
-- [ ] G9 Windows Job Object backend limits a 500 MB allocator at 200 MB (e2e in CI)
+- [x] G9 Windows Job Object backend limits a 500 MB allocator at 200 MB (e2e in CI)
+  CHECK: pytest tests/test_control_windows_job.py (real e2e runs on the windows-latest test job)
+  EVIDENCE: 2026-11-10 Windows 11, `control run --hint memory:200m --hard -- python alloc_500mb.py`:
+  peak 207.6 MB, MemoryError after 150 MB, rc 3, agent told "reached its hard memory cap".
+  Default (watch) mode: kernel peak 508.3 MB, 1 over-limit event, ran to completion, agent told
+  Windows cannot throttle. `cpu:low` -> idle priority (64), weight 3/9. probe tier: job.
+  Design: memory.high is watched, not capped, by default (Windows can only refuse allocations,
+  never throttle); `--hard` opts into JobMemoryLimit.
 - [ ] G10 wheel builds, `uvx --from dist/*.whl cordon --version`, release workflow on tag
 - [ ] G11 Claude Code plugin installs from local marketplace; report.md written; /cordon:report works
 - [ ] G12 `cordon install --client all --dry-run` covers claude-code, codex, gemini, cursor, hermes, opencode, vscode

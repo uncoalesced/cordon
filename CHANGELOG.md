@@ -21,6 +21,14 @@
   left out of aggregate figures; `report --last` skips them. SessionStart records `origin.json`.
 - **No torn markers:** every marker append is one locked `O_APPEND` write (`cordon/lockfile.py`).
 
+### Windows limits
+- New `jobobject` backend (`cordon/control/windows_job.py`): each `control run` command runs in
+  its own Job Object, started suspended so nothing it spawns escapes. CPU weight maps to the
+  job's weight-based rate control (1..9), `cpu:low` to idle priority. The kernel accounts the
+  tree's committed memory; over the limit it is watched and reported, since Windows cannot
+  throttle. `control run --hard` sets a hard cap (allocations past it fail) and tells the agent.
+- `control probe` reports the `job` tier on Windows.
+
 ## v1.1.0 — macOS and Linux
 
 ### Reports you actually see

@@ -98,6 +98,10 @@ def run_guarded(
             "env": env,
             "stderr": stderr_file if stderr_file is not None else None,
         }
+        flags = getattr(backend, "creationflags", None)
+        if handle is not None and flags is not None:
+            # Windows job backend: start suspended, join the job in bind_pid, then resume.
+            popen_kwargs["creationflags"] = flags(handle)
         if handle is not None and host.OS != host.WINDOWS:
             # The child cannot log between fork and exec; it reports a failed join as b"E<errno>"
             # on this pipe instead. preexec_fn runs before close_fds, so the fd is still open.
@@ -184,6 +188,8 @@ def run_guarded(
                 oom_kills=stats.oom_kills,
                 observable=stats.observable and attached,
                 stall_source=stats.stall_source or "psi",
+                # Only the Windows hard cap reports these; Cordon never sets memory.max on Linux.
+                limit_hits=stats.max_events if stats.stall_source == "job" else 0,
             )
             or ""
         )

@@ -355,7 +355,9 @@ def test_advisory_capability_per_os(monkeypatch):
     assert "taskpolicy=" in darwin.detail
     assert probe_module.probe_advisory("linux").available is True
     windows = probe_module.probe_advisory("windows")
-    assert windows.available is False and "null backend" in windows.detail
+    assert windows.available is False and "Job Objects" in windows.detail
+    other = probe_module.probe_advisory("android")
+    assert other.available is False and "null backend" in other.detail
 
 
 def test_probe_lists_the_backend_capabilities():

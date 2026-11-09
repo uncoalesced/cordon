@@ -291,9 +291,12 @@ def cmd_control_run(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        from cordon.control.cgroup import select_backend
+
         result = guard.run_guarded(
             argv,
             hint=args.hint,
+            backend=select_backend(hard_memory=args.hard),
             timeout=args.timeout,
             record_path=Path(args.record) if args.record else None,
         )
@@ -498,6 +501,11 @@ def build_parser() -> argparse.ArgumentParser:
     control_run = control_subparsers.add_parser("run", help="run one command in its own ephemeral cgroup")
     control_run.add_argument("--hint", default=None, help=f"e.g. memory:high; overrides ${INTENT_ENV}")
     control_run.add_argument("--timeout", type=float, default=None)
+    control_run.add_argument(
+        "--hard",
+        action="store_true",
+        help="Windows: cap the job's memory at the tier (allocations past it fail) instead of only watching it",
+    )
     control_run.add_argument("--record", default=None, help="append the result to this jsonl file")
     control_run.add_argument("--json", action="store_true")
     control_run.add_argument("argv", nargs=argparse.REMAINDER)

@@ -164,8 +164,8 @@ class FeedbackPolicy:
     def threshold_s(self, duration_s: float) -> float:
         return max(self.floor_s, self.fraction * max(0.0, duration_s))
 
-    def triggered(self, stall_s: float, duration_s: float, froze: bool, oom_kills: int) -> bool:
-        if froze or oom_kills > 0:
+    def triggered(self, stall_s: float, duration_s: float, froze: bool, oom_kills: int, limit_hits: int = 0) -> bool:
+        if froze or oom_kills > 0 or limit_hits > 0:
             return True
         return stall_s >= self.threshold_s(duration_s)
 
@@ -180,10 +180,11 @@ class FeedbackPolicy:
         oom_kills: int = 0,
         observable: bool = True,
         stall_source: str = "psi",
+        limit_hits: int = 0,
     ) -> str | None:
         if not observable:
             return None
-        if not self.triggered(stall_s, duration_s, froze, oom_kills):
+        if not self.triggered(stall_s, duration_s, froze, oom_kills, limit_hits):
             return None
 
         occurrence = self._counts.get(command, 0) + 1
@@ -197,6 +198,7 @@ class FeedbackPolicy:
             oom_kills=oom_kills,
             occurrence=occurrence,
             stall_source=stall_source,
+            limit_hits=limit_hits,
         )
 
 
@@ -209,6 +211,7 @@ def render_feedback(
     oom_kills: int = 0,
     occurrence: int = 1,
     stall_source: str = "psi",
+    limit_hits: int = 0,
 ) -> str:
     limit = intent.memory_high_mb
     limit_text = "no memory limit" if limit is None else f"a memory:{intent.memory_tier} limit of {limit} MB"
@@ -221,8 +224,16 @@ def render_feedback(
             f"It spent {stall_s:.2f}s ({share:.0f}% of its {duration_s:.1f}s runtime) over its memory "
             "limit; this host only advises, so nothing was throttled, but on a cgroup host it would be."
         )
+    elif stall_s > 0 and stall_source == "job":
+        # Windows jobs cannot throttle memory: this is time over the limit, nothing was slowed.
+        parts.append(
+            f"It spent {stall_s:.2f}s ({share:.0f}% of its {duration_s:.1f}s runtime) over its memory "
+            "limit; Windows cannot throttle memory, so it ran on (`control run --hard` caps it)."
+        )
     elif stall_s > 0:
         parts.append(f"It stalled {stall_s:.2f}s ({share:.0f}% of its {duration_s:.1f}s runtime) waiting on memory.")
+    if limit_hits:
+        parts.append("It reached its hard memory cap, so further allocations were refused; errors after that point are the cap.")
     if froze:
         parts.append("It was frozen and resumed rather than killed, so no work was lost.")
     if oom_kills:

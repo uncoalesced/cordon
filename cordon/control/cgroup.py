@@ -434,14 +434,27 @@ def select_backend(
     os_kind: str | None = None,
     proc_self_cgroup: Path = PROC_SELF_CGROUP,
     systemd: SystemdRunBackend | None = None,
+    hard_memory: bool = False,
 ) -> Any:
     """First backend that passes a real probe: delegated cgroup, root cgroup, systemd scope,
-    advisory watchdog, null. Each candidate actually creates and removes something."""
+    advisory watchdog, null; a Job Object on Windows. Each candidate actually creates and
+    removes something. hard_memory only changes the Windows backend (memory.high cannot be
+    expressed there, so it is watched unless a hard cap is asked for)."""
     from cordon.control.advisory import AdvisoryBackend
 
     log = get_logger("cgroup")
     os_kind = host.OS if os_kind is None else os_kind
-    if force_null or os_kind not in (host.LINUX, host.DARWIN):
+    if force_null:
+        return NullBackend()
+    if os_kind == host.WINDOWS:
+        from cordon.control.windows_job import WindowsJobBackend
+
+        job = WindowsJobBackend(hard_memory=hard_memory)
+        if job.usable():
+            return job
+        log.warning("job objects unusable, recording intent only")
+        return NullBackend()
+    if os_kind not in (host.LINUX, host.DARWIN):
         return NullBackend()
     if os_kind == host.DARWIN:
         return AdvisoryBackend(os_kind=os_kind)
