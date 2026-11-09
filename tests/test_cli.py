@@ -13,7 +13,7 @@ from cordon.wrapper import agents
 from cordon.wrapper.cli import _hook_command, build_parser, main
 from cordon.wrapper.schema import MARKERS_FILENAME, SAMPLES_FILENAME, JsonlWriter, Marker, Sample
 
-HOOK_EVENTS = agents.NESTED_EVENTS[agents.CLAUDE_CODE]
+HOOK_EVENTS = (*agents.NESTED_EVENTS[agents.CLAUDE_CODE], *agents.EXTRA_EVENTS[agents.CLAUDE_CODE])
 _merge_hooks = agents.merge_nested
 
 

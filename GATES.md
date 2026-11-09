@@ -21,10 +21,30 @@ Baseline 2026-10-27 (origin/main f30002c): 492 passed, 2 skipped, coverage 92%. 
 - [~] G4 hook median <= 80 ms
   EVIDENCE: Claude Code http transport: 3.3 ms median, p90 20 ms (40 loopback POSTs).
   ensure (once per session): 540 ms warm. Command transport (codex/gemini/cursor/hermes) still ~330 ms: open.
-- [ ] G5 markers.jsonl: 0 torn lines with 8 writers x 500 appends
-- [ ] G6 background training trees not charged to cat/nvidia-smi (re-reduce Parentheses 92a15925)
-- [ ] G7 runs without SessionEnd get finalized (`cordon finalize --stale`), Parentheses backfilled
-- [ ] G8 empty sessions labelled with SessionStart source
+- [x] G5 markers.jsonl: 0 torn lines with 8 writers x 500 appends
+  CHECK: pytest tests/test_attribution.py -k concurrent
+  EVIDENCE: 2026-11-09 4000/4000 whole lines (cordon/lockfile.py: one os.write per line, O_APPEND,
+  msvcrt/flock lock). Cause found in Parentheses ff5986a3:167: a command-transport `cordon hook`
+  (hook_overhead 399 ms) appended through a buffered handle while the daemon wrote the same file.
+- [x] G6 background training trees not charged to cat/nvidia-smi (re-reduce Parentheses 92a15925)
+  EVIDENCE: 2026-11-09 re-reduced: every `cat` row 0-94 MB (its own shell); training trees listed
+  under "Where the rest went" as background of the call that launched them.
+- [x] G6b peer hook trees not charged to tool calls (positive attribution)
+  CHECK: pytest tests/test_attribution.py
+  EVIDENCE: 2026-11-09 Parentheses b769f654 before: Read 526 MB / Write 445 MB / "own 60-100
+  procs" on every call. After: Read/Edit/Write/MCP = 0, top rows are the python runs (1774, 1312,
+  732 MB). All 86 runs: hooks 24,787 CPU-s vs 10,860 CPU-s for every tool call; ecc's shared
+  hook launcher alone spawned 413,320 processes in 34 sessions.
+- [x] G7 runs without SessionEnd get finalized
+  EVIDENCE: daemon finalizes on idle/agent exit (log 2026-11-04: "no markers for over 1800s" ->
+  report written); every Parentheses run since 2026-10-27 has report.md. `finalize --stale` not needed.
+- [x] G8 empty sessions labelled with SessionStart source
+  EVIDENCE: 40 of 86 Parentheses runs are startup->end in ~2 s with 0 calls. summary.json `empty`,
+  status hides them (--all shows), ALL-report leaves them out of figures; daemon now writes
+  origin.json (agent + parent command line) at SessionStart so the next ones say who started them.
+- [x] G8b failed calls paired: Claude Code PostToolUseFailure installed; old runs infer the end of
+  a Bash/PowerShell call whose shell ran (exit_status "no end event"). Parentheses unpaired 989 -> 830,
+  the rest are calls another PreToolUse hook blocked (Write 329, Edit 161) or denied.
 - [ ] G9 Windows Job Object backend limits a 500 MB allocator at 200 MB (e2e in CI)
 - [ ] G10 wheel builds, `uvx --from dist/*.whl cordon --version`, release workflow on tag
 - [ ] G11 Claude Code plugin installs from local marketplace; report.md written; /cordon:report works

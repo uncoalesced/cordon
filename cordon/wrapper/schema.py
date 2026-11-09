@@ -29,6 +29,9 @@ RUN_LOG_FILENAME = "cordon.log"
 # without importing psutil. sampler.py re-exports it, so sampler.DEFAULT_INTERVAL_S still resolves.
 DEFAULT_INTERVAL_S = 0.25
 
+# Tools whose duration is the human's thinking time, not work the tool did.
+INTERACTIVE_TOOLS = ("AskUserQuestion", "ExitPlanMode", "EnterPlanMode")
+
 
 @dataclass
 class Sample:
@@ -232,8 +235,16 @@ class JsonlWriter:
 
 
 def append_jsonl(path: Path, obj: Any) -> bool:
-    with JsonlWriter(path) as writer:
-        return writer.write(obj)
+    """Append one record as a whole line, safe against other processes appending at once."""
+    from cordon.lockfile import append_line
+
+    payload = obj.to_dict() if hasattr(obj, "to_dict") else obj
+    try:
+        append_line(Path(path), json.dumps(payload, default=repr))
+        return True
+    except (OSError, TypeError, ValueError):
+        log_failure(get_logger("jsonl"), "jsonl append failed", path=str(path), payload=payload)
+        return False
 
 
 def read_jsonl(path: Path, quiet: bool = False) -> Iterator[dict[str, Any]]:

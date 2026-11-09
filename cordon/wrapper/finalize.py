@@ -142,9 +142,17 @@ def collect_status(runs_root: Path) -> list[RunStatus]:
     return [run_status(run_dir) for run_dir in list_runs(runs_root)]
 
 
-def render_status(rows: list[RunStatus]) -> str:
+def render_status(rows: list[RunStatus], show_empty: bool = True) -> str:
     if not rows:
         return "no runs recorded"
+    hidden = 0
+    if not show_empty:
+        kept = [r for r in rows if r.n_calls or r.sampler_live]
+        hidden = len(rows) - len(kept)
+        rows = kept
+    footer = f"\n({hidden} session(s) with no tool calls hidden; --all shows them)" if hidden else ""
+    if not rows:
+        return "no sessions with tool calls" + footer
     header = ("session", "started", "duration", "tool calls", "peak MB", "report", "sampler")
     lines = [
         (
@@ -159,7 +167,16 @@ def render_status(rows: list[RunStatus]) -> str:
         for row in rows
     ]
     widths = [max(len(r[i]) for r in (header, *lines)) for i in range(len(header))]
-    return "\n".join("  ".join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip() for r in (header, *lines))
+    table = "\n".join("  ".join(cell.ljust(w) for cell, w in zip(r, widths)).rstrip() for r in (header, *lines))
+    return table + footer
+
+
+def has_tool_calls(run_dir: Path) -> bool:
+    """Cheap check (no JSON parsing) for whether a session ever finished a tool call."""
+    try:
+        return f'"{EVENT_TOOL_END}"' in (Path(run_dir) / MARKERS_FILENAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
 
 
 def clean_orphans(runs_root: Path, rows: list[RunStatus] | None = None, now: float | None = None) -> list[str]:

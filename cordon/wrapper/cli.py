@@ -367,7 +367,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         if not runs:
             log.error("no runs found | runs=%s", root)
             return 1
-        run_dir = runs[-1]
+        # The newest session that did something: short sessions that never call a tool are common.
+        run_dir = next((r for r in reversed(runs) if finalize_module.has_tool_calls(r)), runs[-1])
 
     path = finalize_module.report_path(run_dir)
     if not path.exists():
@@ -386,7 +387,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     configure(level=logging.DEBUG if args.verbose else logging.INFO, to_stderr=False)
     root = _runs_root(args)
     rows = collect_status(root)
-    print(render_status(rows))
+    print(render_status(rows, show_empty=args.all))
     if args.clean:
         for session in clean_orphans(root, rows):
             print(f"stopped orphaned sampler: {session}")
@@ -478,6 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="list recorded sessions and live samplers")
     status.add_argument("--runs", default=None, help="runs directory (default: the hook's run root)")
     status.add_argument("--clean", action="store_true", help="stop samplers whose agent is gone or idle")
+    status.add_argument("--all", action="store_true", help="include sessions that never called a tool")
     status.set_defaults(func=cmd_status)
 
     wrap = subparsers.add_parser("wrap", help="run an agent with no hook system (e.g. Aider) as a child and sample it directly")

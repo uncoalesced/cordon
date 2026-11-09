@@ -38,6 +38,7 @@ DEFAULT_PORT = 47821
 ENV_PORT = "CORDON_PORT"
 STATE_FILENAME = "daemon.json"
 LOG_FILENAME = "daemon.log"
+ORIGIN_FILENAME = "origin.json"
 HOOK_PATH = "/hook"
 HEALTH_PATH = "/health"
 MAX_BODY = 4 << 20
@@ -181,11 +182,41 @@ class Daemon:
             marker = build_marker(payload, now, session.agent_pid, spawn_ts=now if kind == "post" else 0.0)
             append_jsonl(run_dir / MARKERS_FILENAME, marker)
 
+            if kind == "start":
+                self._snapshot_hooks(run_dir, payload.get("cwd"))
+                self._note_origin(run_dir, session.agent_pid)
             if kind in ("start", "pre"):
                 self._ensure_sampler(session)
             elif kind == "end":
                 threading.Thread(target=self._finish, args=(session,), name=f"finalize-{run_dir.name}", daemon=True).start()
         return marker
+
+    def _snapshot_hooks(self, run_dir: Path, cwd: Any) -> None:
+        """Note the session's other hook commands so reduce can keep their processes out of tool calls."""
+        from cordon.wrapper.hookconfig import write_snapshot
+
+        try:
+            write_snapshot(run_dir, cwd if isinstance(cwd, str) else None)
+        except Exception:
+            log_failure(self.log, "could not snapshot hook config", run_dir=str(run_dir))
+
+    def _note_origin(self, run_dir: Path, agent_pid: int) -> None:
+        """Who started this agent: the only clue to the short sessions that never call a tool."""
+        path = run_dir / ORIGIN_FILENAME
+        if not agent_pid or path.exists():
+            return
+        try:
+            import psutil
+
+            agent = psutil.Process(agent_pid)
+            parent = agent.parent()
+            origin = {
+                "agent_cmd": " ".join(agent.cmdline())[:500],
+                "parent_cmd": " ".join(parent.cmdline())[:500] if parent else "",
+            }
+            path.write_text(json.dumps(origin, indent=1), encoding="utf-8")
+        except Exception:
+            log_failure(self.log, "could not note session origin", run_dir=str(run_dir))
 
     def _ensure_sampler(self, session: Session) -> None:
         if not session.agent_pid or (session.sampler is not None and session.sampler.is_alive()):

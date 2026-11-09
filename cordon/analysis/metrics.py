@@ -11,24 +11,50 @@ from typing import Any
 from cordon.analysis.dataset import Run
 from cordon.wrapper.logging_setup import get_logger, log_failure
 from cordon.wrapper.reduce import union_seconds
-from cordon.wrapper.schema import Sample, ToolCallRecord
+from cordon.wrapper.schema import INTERACTIVE_TOOLS, Sample, ToolCallRecord
 
 BURST_THRESHOLD_MB = 300.0
 BASELINE_QUANTILE = 0.1
 RETRY_MIN_LENGTH = 3
-RETRY_TOOLS = ("Bash",)
-# Tools whose duration is the human's thinking time, not work the tool did.
-INTERACTIVE_TOOLS = ("AskUserQuestion", "ExitPlanMode", "EnterPlanMode")
+# Shell tools: their command is a command line, so it can be categorised and retried.
+RETRY_TOOLS = ("Bash", "PowerShell")
 HEAVY_CALL_LIMIT = 15
 
+# An executable, optionally behind a path (.venv/Scripts/python.exe, & "C:\...\git.exe").
+_EXE = r"^\s*(?:&\s*)?[\"']?(?:[^\s\"']*[\\/])?"
+# In priority order: a segment that runs tests is "test" even if it also cd's and greps.
 BASH_CATEGORIES: tuple[tuple[str, str], ...] = (
-    ("test", r"\b(pytest|unittest|nosetests|tox|jest|vitest|mocha|go\s+test|cargo\s+test|mvn\s+test|npm\s+(run\s+)?test)\b"),
-    ("install", r"\b(pip|pip3|uv|poetry|conda|npm|yarn|pnpm|apt|apt-get|brew|cargo)\s+(install|add|ci)\b"),
-    ("build", r"\b(make|cmake|ninja|tsc|gcc|g\+\+|clang|cargo\s+build|npm\s+run\s+build|docker\s+build)\b"),
-    ("vcs", r"^\s*(git|gh|hg|svn)\b"),
-    ("python", r"^\s*(python|python3|py)\b"),
-    ("filesystem", r"^\s*(ls|dir|cat|type|head|tail|find|grep|rg|wc|cd|mkdir|rm|cp|mv|touch|echo|sed|awk)\b"),
+    (
+        "test",
+        r"\b(pytest|unittest|nosetests|tox|jest|vitest|mocha|go\s+test|cargo\s+test|mvn\s+test|npm\s+(run\s+)?test)\b"
+        r"|\btests?[\\/]\S*test_\w+\.py\b|\bInvoke-Pester\b",
+    ),
+    ("install", r"\b(pip|pip3|uv|poetry|conda|npm|yarn|pnpm|apt|apt-get|brew|cargo)\s+(install|add|ci|sync)\b"),
+    ("build", r"\b(make|cmake|ninja|tsc|gcc|g\+\+|clang|cargo\s+build|npm\s+run\s+build|docker\s+build|uv\s+build)\b"),
+    ("python", _EXE + r"(python|python3|py|uv\s+run|uvx)(?:\.exe)?\b"),
+    ("vcs", _EXE + r"(git|gh|hg|svn)(?:\.exe)?\b"),
+    # Polling for something else to finish (a training run, a log line): time spent waiting.
+    ("wait", r"\bStart-Sleep\b|(?:^|\s)sleep\s+\d|\btail\s+-[fF]\b|\bGet-Content\b.*\s-Wait\b|\bWait-(?:Process|Job)\b"),
+    (
+        "filesystem",
+        _EXE + r"(ls|dir|cat|type|head|tail|find|grep|rg|wc|mkdir|rm|cp|mv|touch|echo|sed|awk|du|stat|sort|"
+        r"Get-ChildItem|Get-Content|Get-Item|Select-String|Test-Path|Copy-Item|Move-Item|Remove-Item|"
+        r"New-Item|Set-Content|Out-File|Measure-Object|Select-Object|Format-Table|Write-Output)\b",
+    ),
 )
+# Setup that says nothing about what a command does: cd, env assignments, PowerShell variables.
+_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s;&|]+)"
+_SETUP = re.compile(
+    rf"^\s*(?:cd|pushd|Set-Location|sl)\s+{_VALUE}\s*$"
+    rf"|^\s*export(?:\s+[A-Za-z_]\w*(?:={_VALUE})?)+\s*$"
+    rf"|^\s*(?:[A-Za-z_]\w*={_VALUE}\s*)+$"
+    rf"|^\s*\$(?:env:)?\w+\s*=.*$",
+    re.IGNORECASE,
+)
+_ENV_PREFIX = re.compile(rf"^\s*(?:export\s+)?(?:[A-Za-z_]\w*={_VALUE}\s+)+")
+_KEYWORD_PREFIX = re.compile(r"^\s*(?:do|then|else|time|sudo|nohup|exec)\s+")
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|\n]")
+_RANK = {name: i for i, (name, _) in enumerate(BASH_CATEGORIES)}
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -52,16 +78,33 @@ def in_any_window(t: float, windows: Sequence[tuple[float, float]]) -> bool:
     return any(start <= t <= end for start, end in windows)
 
 
-def classify_bash(command: str) -> str:
+def _segment_category(segment: str) -> str | None:
+    if _SETUP.match(segment):
+        return None
+    segment = _KEYWORD_PREFIX.sub("", _ENV_PREFIX.sub("", segment))
     for name, pattern in BASH_CATEGORIES:
-        if re.search(pattern, command, flags=re.IGNORECASE):
+        if re.search(pattern, segment, flags=re.IGNORECASE):
             return name
+    return "other" if segment.strip() else None
+
+
+def classify_bash(command: str) -> str:
+    """Category of a shell command line: the weightiest category among its segments.
+
+    `cd repo && PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m pytest` is a test run, not a
+    filesystem command; setup segments (cd, exports, PowerShell variables) do not vote.
+    """
+    found = [c for seg in _SEGMENT_SPLIT.split(command) if (c := _segment_category(seg))]
+    known = [c for c in found if c != "other"]
+    if known:
+        return min(known, key=_RANK.__getitem__)
     return "other"
 
 
 @dataclass
 class ExecutionSplit:
     span_s: float = 0.0
+    active_s: float = 0.0
     tool_time_s: float = 0.0
     non_tool_time_s: float = 0.0
     tool_time_fraction: float = 0.0
@@ -182,20 +225,56 @@ class DatasetMetrics:
     mean_sample_time_in_tools_fraction: float = 0.0
     max_change_rate_mb_per_s: float = 0.0
     degraded_runs: int = 0
+    # Sessions that never called a tool: counted, left out of every average.
+    empty_runs: int = 0
+    # Memory/CPU no tool call was charged with (hooks, background work, the agent's helpers),
+    # summed over runs by what spent it.
+    process_groups: list[dict[str, Any]] = field(default_factory=list)
+    # Calls that started and never ended (blocked, denied, interrupted), by tool.
+    unpaired_by_tool: dict[str, int] = field(default_factory=dict)
+    total_tool_cpu_s: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
+def merge_process_groups(runs: Sequence[Run], limit: int = 15) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for run in runs:
+        for group in run.summary.get("process_groups") or []:
+            if not isinstance(group, dict):
+                continue
+            key = (str(group.get("kind", "")), str(group.get("label", "")))
+            entry = merged.setdefault(key, {"kind": key[0], "label": key[1], "procs": 0, "peak_mb": 0.0, "cpu_s": 0.0, "runs": 0})
+            entry["procs"] += int(group.get("procs", 0))
+            entry["cpu_s"] = round(entry["cpu_s"] + float(group.get("cpu_s", 0.0)), 1)
+            entry["peak_mb"] = max(entry["peak_mb"], float(group.get("peak_mb", 0.0)))
+            entry["runs"] += 1
+    return sorted(merged.values(), key=lambda g: (g["cpu_s"], g["peak_mb"]), reverse=True)[:limit]
+
+
+def tool_cpu_seconds(calls: Sequence[ToolCallRecord]) -> float:
+    """CPU-seconds charged to tool calls (own processes' mean CPU % over each call's duration)."""
+    return round(sum(added_cpu(c) / 100.0 * c.duration_s for c in calls if c.tool_type not in INTERACTIVE_TOOLS), 1)
+
+
 def execution_split(run: Run) -> ExecutionSplit:
+    """Tool time against the time the session was in use.
+
+    Runs reduced since active time existed carry it in summary.json; a resumed session's
+    wall-clock span can cover days, so it is only the fallback. Calls that wait on the person
+    (AskUserQuestion, ExitPlanMode) are their thinking time, not tool time.
+    """
     span = run.span_s
-    tool_time = union_seconds(run.windows)
+    active = float(run.summary.get("active_s") or 0.0) or span
+    tool_time = union_seconds([(c.start_ts, c.end_ts) for c in run.toolcalls if c.tool_type not in INTERACTIVE_TOOLS])
     return ExecutionSplit(
         span_s=round(span, 3),
+        active_s=round(active, 3),
         tool_time_s=round(tool_time, 3),
-        non_tool_time_s=round(max(0.0, span - tool_time), 3),
-        tool_time_fraction=_ratio(tool_time, span),
-        non_tool_time_fraction=_ratio(max(0.0, span - tool_time), span),
+        non_tool_time_s=round(max(0.0, active - tool_time), 3),
+        tool_time_fraction=_ratio(tool_time, active),
+        non_tool_time_fraction=_ratio(max(0.0, active - tool_time), active),
         n_toolcalls=len(run.toolcalls),
     )
 
@@ -276,7 +355,8 @@ def burst_profile(run: Run, threshold_mb: float = BURST_THRESHOLD_MB) -> BurstPr
 
 
 def _group_stats(groups: dict[str, list[ToolCallRecord]]) -> list[ToolTypeStats]:
-    total_time = sum(call.duration_s for calls in groups.values() for call in calls)
+    # Shares are of working tool time: a plan waiting 12 minutes for approval is not work.
+    total_time = sum(call.duration_s for calls in groups.values() for call in calls if call.tool_type not in INTERACTIVE_TOOLS)
     stats = []
     for name, calls in groups.items():
         durations = [call.duration_s for call in calls]
@@ -287,7 +367,7 @@ def _group_stats(groups: dict[str, list[ToolCallRecord]]) -> list[ToolTypeStats]
                 tool_type=name,
                 n_calls=len(calls),
                 total_time_s=round(sum(durations), 3),
-                time_share=_ratio(sum(durations), total_time),
+                time_share=0.0 if name in INTERACTIVE_TOOLS else _ratio(sum(durations), total_time),
                 mean_duration_s=_mean(durations),
                 mean_peak_mb=_mean(peaks),
                 max_peak_mb=round(max(peaks), 3) if peaks else 0.0,
@@ -296,7 +376,7 @@ def _group_stats(groups: dict[str, list[ToolCallRecord]]) -> list[ToolTypeStats]
                 mean_delta_cpu_pct=_mean([added_cpu(call) for call in calls]),
             )
         )
-    stats.sort(key=lambda s: s.total_time_s, reverse=True)
+    stats.sort(key=lambda s: (s.tool_type not in INTERACTIVE_TOOLS, s.total_time_s), reverse=True)
     return stats
 
 
@@ -416,8 +496,15 @@ def analyze_run(run: Run, burst_threshold_mb: float = BURST_THRESHOLD_MB) -> Run
 
 
 def analyze_dataset(runs: Sequence[Run], burst_threshold_mb: float = BURST_THRESHOLD_MB) -> DatasetMetrics:
+    empty = [run for run in runs if not run.toolcalls]
+    runs = [run for run in runs if run.toolcalls] or list(runs)
     per_run = [analyze_run(run, burst_threshold_mb) for run in runs]
     all_calls = [call for run in runs for call in run.toolcalls]
+
+    unpaired: dict[str, int] = {}
+    for run in runs:
+        for tool, count in (run.summary.get("unpaired_by_tool") or {}).items():
+            unpaired[tool] = unpaired.get(tool, 0) + int(count)
 
     dataset = DatasetMetrics(
         n_runs=len(per_run),
@@ -427,6 +514,11 @@ def analyze_dataset(runs: Sequence[Run], burst_threshold_mb: float = BURST_THRES
         bash_categories=bash_category_breakdown(all_calls),
         heaviest_calls=heaviest_calls(all_calls),
         degraded_runs=sum(1 for m in per_run if m.degraded),
+        # When every run is empty they stay in (a one-session report still renders).
+        empty_runs=len(empty) if all_calls else 0,
+        process_groups=merge_process_groups(runs),
+        unpaired_by_tool=dict(sorted(unpaired.items(), key=lambda kv: -kv[1])),
+        total_tool_cpu_s=tool_cpu_seconds(all_calls),
     )
 
     if not per_run:

@@ -137,7 +137,9 @@ def test_reduce_run_reports_tool_time_fraction_over_the_union(run_dir: Path):
 
     assert summary["span_s"] == 6.0
     assert summary["tool_time_s"] == 3.0
-    assert summary["tool_time_fraction"] == 0.5
+    # Share is over active time (hook events 0..3 s), not the sampler's 6 s span.
+    assert summary["active_s"] == 3.0
+    assert summary["tool_time_fraction"] == 1.0
 
 
 def test_reduce_run_survives_malformed_lines(run_dir: Path):

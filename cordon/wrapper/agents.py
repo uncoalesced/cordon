@@ -31,6 +31,10 @@ NESTED_EVENTS: dict[str, tuple[str, str, str, str]] = {
     GEMINI: ("SessionStart", "BeforeTool", "AfterTool", "SessionEnd"),
 }
 
+# Events past the four lifecycle moments. Claude Code reports a tool call that failed as
+# PostToolUseFailure, not PostToolUse; without it every failed call was left without an end.
+EXTRA_EVENTS: dict[str, tuple[str, ...]] = {CLAUDE_CODE: ("PostToolUseFailure",)}
+
 CURSOR_EVENTS = ("sessionStart", "preToolUse", "postToolUse", "postToolUseFailure", "sessionEnd")
 HERMES_EVENTS = ("on_session_start", "pre_tool_call", "post_tool_call", "on_session_end")
 
@@ -88,7 +92,8 @@ ENSURE_TIMEOUT_S = 15
 
 def nested_settings(agent: str, hook_command: str) -> dict[str, Any]:
     entry = {"matcher": "*", "hooks": [{"type": "command", "command": hook_command}]}
-    return {"hooks": {event: [dict(entry)] for event in NESTED_EVENTS[agent]}}
+    events = (*NESTED_EVENTS[agent], *EXTRA_EVENTS.get(agent, ()))
+    return {"hooks": {event: [dict(entry)] for event in events}}
 
 
 def http_settings(agent: str, ensure_command: str, url: str) -> dict[str, Any]:
@@ -97,7 +102,7 @@ def http_settings(agent: str, ensure_command: str, url: str) -> dict[str, Any]:
     hooks: dict[str, Any] = {
         start: [{"matcher": "*", "hooks": [{"type": "command", "command": ensure_command, "timeout": ENSURE_TIMEOUT_S}]}]
     }
-    for event in rest:
+    for event in (*rest, *EXTRA_EVENTS.get(agent, ())):
         hooks[event] = [{"matcher": "*", "hooks": [{"type": "http", "url": url, "timeout": HTTP_HOOK_TIMEOUT_S}]}]
     return {"hooks": hooks}
 

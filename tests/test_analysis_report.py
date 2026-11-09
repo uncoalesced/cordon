@@ -72,7 +72,7 @@ def test_report_renders_every_section(make_run, make_call, make_samples):
     for heading in (
         "## Comparison against the paper",
         "## Per-tool-type breakdown",
-        "## Bash command categories",
+        "## Shell command categories",
         "## Per-run detail",
         "## Retry loops",
         "## Methodology",

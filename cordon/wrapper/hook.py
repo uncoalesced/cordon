@@ -27,8 +27,8 @@ from cordon.wrapper.schema import (
     EVENT_TOOL_START,
     MARKERS_FILENAME,
     RUN_LOG_FILENAME,
-    JsonlWriter,
     Marker,
+    append_jsonl,
     call_key_for,
     summarize_command,
 )
@@ -47,7 +47,7 @@ FINALIZE_STDERR_FILENAME = "finalize.stderr"
 _START_EVENTS = {"SessionStart", "on_session_start", "sessionStart"}
 _END_EVENTS = {"SessionEnd", "Stop", "on_session_end", "sessionEnd", "stop"}
 _PRE_EVENTS = {"PreToolUse", "pre_tool_call", "preToolUse", "BeforeTool"}
-_POST_EVENTS = {"PostToolUse", "post_tool_call", "postToolUse", "postToolUseFailure", "AfterTool"}
+_POST_EVENTS = {"PostToolUse", "PostToolUseFailure", "post_tool_call", "postToolUse", "postToolUseFailure", "AfterTool"}
 
 _UNKNOWN_SESSION = "unknown-session"
 
@@ -282,6 +282,13 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
     marker = build_marker(payload, now, agent_pid, spawn_ts=_spawn_ts() if kind == "post" else 0.0)
     assert marker is not None
 
+    if kind == "start":
+        from cordon.wrapper.hookconfig import write_snapshot
+
+        try:
+            write_snapshot(run_dir, payload.get("cwd") if isinstance(payload.get("cwd"), str) else None)
+        except Exception:
+            log_failure(log, "could not snapshot hook config", run_dir=str(run_dir))
     if starts:
         spawn_sampler(run_dir, agent_pid, _interval())
     elif kind == "end":
@@ -292,8 +299,8 @@ def handle(payload: dict[str, Any], run_root: Path | None = None, now: float | N
         # Only start markers' overhead is reported (reduce reads it from the tool_start marker).
         marker.hook_overhead_ms = round((time.time() - _process_start_time(os.getpid())) * 1000.0, 3)
 
-    with JsonlWriter(run_dir / MARKERS_FILENAME) as writer:
-        writer.write(marker)
+    # The daemon may be appending to this same file: whole-line, locked append.
+    append_jsonl(run_dir / MARKERS_FILENAME, marker)
     return marker
 
 

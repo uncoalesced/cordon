@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased (v2)
+
+### Reports you can trust, from a week of real use on Parentheses
+- **Peer hooks no longer billed to tool calls.** Under the http transport other plugins' hooks
+  start at the same instant as the call, so every call (Read and Write included) was charged
+  300-500 MB of someone else's processes. Claude Code runs now use positive attribution: a call
+  owns only its own tool's processes (the Bash tool's snapshot shell, the PowerShell tool's
+  launcher, Grep/Glob's `rg`). Other agents keep window attribution, minus hook trees.
+- **Where the rest went:** a new report section groups everything no call was charged with:
+  hooks (named by plugin and script, from a `hooks.json` snapshot taken at SessionStart),
+  background work a call left running, and the agent's own helpers.
+- **Active time:** tool share is over time the session was in use, not a resumed session's
+  multi-day span. Calls that wait on you (AskUserQuestion, ExitPlanMode) are not tool time.
+- **Shell categories** read past `cd`, env assignments and PowerShell variables, cover the
+  PowerShell tool, and add `wait` for polling loops.
+- **Failed calls paired:** `PostToolUseFailure` is now installed for Claude Code; older runs
+  infer the end of a shell call whose shell ran. Calls that never ran are listed on their own.
+- **Empty sessions** are marked in summary.json, hidden by `status` (`--all` shows them) and
+  left out of aggregate figures; `report --last` skips them. SessionStart records `origin.json`.
+- **No torn markers:** every marker append is one locked `O_APPEND` write (`cordon/lockfile.py`).
+
 ## v1.1.0 — macOS and Linux
 
 ### Reports you actually see
