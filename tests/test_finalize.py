@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from features.wrapper import finalize as finalize_module
-from features.wrapper import hook as hook_module
-from features.wrapper.cli import main
-from features.wrapper.sampler import stop_file, write_pid_file
-from features.wrapper.schema import JsonlWriter, Sample
+from cordon.wrapper import finalize as finalize_module
+from cordon.wrapper import hook as hook_module
+from cordon.wrapper.cli import main
+from cordon.wrapper.sampler import stop_file, write_pid_file
+from cordon.wrapper.schema import JsonlWriter, Sample
 
 
 @pytest.fixture(autouse=True)

@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from features.analysis.dataset import load_dataset, load_run
-from features.wrapper.reduce import SUMMARY_FILENAME, reduce_run
-from features.wrapper.schema import (
+from cordon.analysis.dataset import load_dataset, load_run
+from cordon.wrapper.reduce import SUMMARY_FILENAME, reduce_run
+from cordon.wrapper.schema import (
     EVENT_TOOL_END,
     EVENT_TOOL_START,
     MARKERS_FILENAME,

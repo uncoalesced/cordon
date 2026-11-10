@@ -9,10 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from features import host
-from features.control import cgroup as cgroup_module
-from features.control.advisory import AdvisoryBackend
-from features.control.cgroup import (
+from cordon import host
+from cordon.control import cgroup as cgroup_module
+from cordon.control.advisory import AdvisoryBackend
+from cordon.control.cgroup import (
     SKIPPED,
     Cgroup2Backend,
     CgroupHandle,
@@ -22,8 +22,8 @@ from features.control.cgroup import (
     call_cgroup_name,
     select_backend,
 )
-from features.control.intent import MEMORY_TIER_FLOOR_MB, resolve_intent
-from features.control.probe import find_delegated_base
+from cordon.control.intent import MEMORY_TIER_FLOOR_MB, resolve_intent
+from cordon.control.probe import find_delegated_base
 
 GB = 1024**3
 
@@ -101,8 +101,7 @@ def test_stats_parse_peak_pressure_and_events(backend: Cgroup2Backend):
     (handle.path / "memory.peak").write_text("1073741824\n", encoding="utf-8")
     (handle.path / "memory.current").write_text("104857600\n", encoding="utf-8")
     (handle.path / "memory.pressure").write_text(
-        "some avg10=1.00 avg60=0.00 avg300=0.00 total=900000\n"
-        "full avg10=1.00 avg60=0.00 avg300=0.00 total=340000\n",
+        "some avg10=1.00 avg60=0.00 avg300=0.00 total=900000\nfull avg10=1.00 avg60=0.00 avg300=0.00 total=340000\n",
         encoding="utf-8",
     )
     (handle.path / "memory.events").write_text("low 0\nhigh 239\nmax 4\noom 1\noom_kill 2\n", encoding="utf-8")
@@ -201,9 +200,7 @@ def test_linux_without_cgroups_takes_systemd_run_when_it_works(tmp_path: Path):
 
 
 def test_linux_root_mount_is_chosen_when_it_passes_the_write_probe(fake_cgroupfs: Path, tmp_path: Path):
-    chosen = select_backend(
-        root=fake_cgroupfs, os_kind=host.LINUX, proc_self_cgroup=tmp_path / "nope", systemd=_NoSystemd()
-    )
+    chosen = select_backend(root=fake_cgroupfs, os_kind=host.LINUX, proc_self_cgroup=tmp_path / "nope", systemd=_NoSystemd())
     assert isinstance(chosen, Cgroup2Backend) and chosen.mode == "root"
     assert chosen.controllers == ("cpu", "memory")
     assert not [p for p in chosen.parent.iterdir() if p.name.startswith("probe_")]
@@ -231,9 +228,7 @@ def _user_tree(tmp_path: Path, service_controllers: str = "cpu memory pids") -> 
     app = _node(service / "app.slice", service_controllers, "")
     scope = _node(app / "vte-spawn-1.scope", service_controllers, "", "4242\n4243")
     proc_file = tmp_path / "proc_self_cgroup"
-    proc_file.write_text(
-        "0::/user.slice/user-1000.slice/user@1000.service/app.slice/vte-spawn-1.scope\n", encoding="utf-8"
-    )
+    proc_file.write_text("0::/user.slice/user-1000.slice/user@1000.service/app.slice/vte-spawn-1.scope\n", encoding="utf-8")
     return mount, scope, proc_file
 
 

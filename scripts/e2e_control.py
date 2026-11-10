@@ -28,7 +28,7 @@ CHILD = "import time; b = b'\\x01' * ({mb} << 20); time.sleep({hold})"
 
 def _cordon() -> list[str]:
     found = shutil.which("cordon")
-    return [found] if found else [sys.executable, "-m", "features.wrapper.cli"]
+    return [found] if found else [sys.executable, "-m", "cordon.wrapper.cli"]
 
 
 def _parse(stdout: str) -> dict:
@@ -56,12 +56,14 @@ def check(result: dict, expected: set[str]) -> list[str]:
         problems.append(f"high_events={stats.get('high_events')} (expected > 0)")
     # The limit biting (high_events) is the enforcement proof. A warning is only owed once the
     # stall crosses the guard's own threshold; a throttle that barely hurt stays silent by design.
-    from features.control.intent import FeedbackPolicy
+    from cordon.control.intent import FeedbackPolicy
 
     stall = float(stats.get("memory_stall_s") or 0.0)
     owed = stall >= FeedbackPolicy().threshold_s(float(result.get("duration_s") or 0.0))
     if owed and not result.get("feedback"):
-        problems.append(f"stall {stall}s crossed the threshold but no feedback was emitted (source={stats.get('stall_source')!r})")
+        problems.append(
+            f"stall {stall}s crossed the threshold but no feedback was emitted (source={stats.get('stall_source')!r})"
+        )
     if not owed and result.get("feedback") and not stats.get("oom_kills") and not stats.get("froze"):
         problems.append(f"feedback emitted for a {stall}s stall below the threshold")
     expected_source = "watchdog" if backend == "advisory" else "psi"

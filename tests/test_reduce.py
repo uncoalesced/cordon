@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from features.wrapper.reduce import (
+from cordon.wrapper.reduce import (
     SUMMARY_FILENAME,
     pair_markers,
     reduce_run,
     slice_samples,
 )
-from features.wrapper.schema import (
+from cordon.wrapper.schema import (
     EVENT_TOOL_END,
     EVENT_TOOL_START,
     MARKERS_FILENAME,
@@ -70,13 +70,16 @@ def test_slice_samples_is_inclusive_on_both_bounds():
 
 def test_reduce_run_produces_spec_shaped_records(run_dir: Path):
     _markers(run_dir, [_start(100.0), _end(103.0)])
-    _samples(run_dir, [
-        Sample(t=99.0, mem_mb=180.0, cpu_pct=2.0),
-        Sample(t=100.5, mem_mb=200.0, cpu_pct=10.0),
-        Sample(t=101.5, mem_mb=800.0, cpu_pct=90.0),
-        Sample(t=102.5, mem_mb=400.0, cpu_pct=50.0),
-        Sample(t=110.0, mem_mb=185.0, cpu_pct=1.0),
-    ])
+    _samples(
+        run_dir,
+        [
+            Sample(t=99.0, mem_mb=180.0, cpu_pct=2.0),
+            Sample(t=100.5, mem_mb=200.0, cpu_pct=10.0),
+            Sample(t=101.5, mem_mb=800.0, cpu_pct=90.0),
+            Sample(t=102.5, mem_mb=400.0, cpu_pct=50.0),
+            Sample(t=110.0, mem_mb=185.0, cpu_pct=1.0),
+        ],
+    )
 
     result = reduce_run(run_dir, task_id="task-1")
 
@@ -134,7 +137,9 @@ def test_reduce_run_reports_tool_time_fraction_over_the_union(run_dir: Path):
 
     assert summary["span_s"] == 6.0
     assert summary["tool_time_s"] == 3.0
-    assert summary["tool_time_fraction"] == 0.5
+    # Share is over active time (hook events 0..3 s), not the sampler's 6 s span.
+    assert summary["active_s"] == 3.0
+    assert summary["tool_time_fraction"] == 1.0
 
 
 def test_reduce_run_survives_malformed_lines(run_dir: Path):
@@ -159,12 +164,17 @@ def test_reduce_run_on_empty_dir_returns_zeroes(run_dir: Path):
 
 def test_call_is_charged_only_for_what_it_adds_above_the_pre_call_level(run_dir: Path):
     # Agent tree already at 1500 MB; a cheap `sed` adds nothing, a training run adds 1000 MB.
-    _samples(run_dir, [Sample(t=t / 4, mem_mb=1500.0, cpu_pct=20.0) for t in range(0, 8)]
-             + [Sample(t=2.0, mem_mb=1510.0, cpu_pct=25.0), Sample(t=2.25, mem_mb=1505.0, cpu_pct=20.0)]
-             + [Sample(t=t / 4, mem_mb=1500.0, cpu_pct=20.0) for t in range(10, 16)]
-             + [Sample(t=4.0, mem_mb=2500.0, cpu_pct=120.0), Sample(t=4.25, mem_mb=2400.0, cpu_pct=100.0)])
-    _markers(run_dir, [_start(2.0, "a", command="sed -n 1p x"), _end(2.3, "a"),
-                       _start(4.0, "b", command="python train.py"), _end(4.3, "b")])
+    _samples(
+        run_dir,
+        [Sample(t=t / 4, mem_mb=1500.0, cpu_pct=20.0) for t in range(0, 8)]
+        + [Sample(t=2.0, mem_mb=1510.0, cpu_pct=25.0), Sample(t=2.25, mem_mb=1505.0, cpu_pct=20.0)]
+        + [Sample(t=t / 4, mem_mb=1500.0, cpu_pct=20.0) for t in range(10, 16)]
+        + [Sample(t=4.0, mem_mb=2500.0, cpu_pct=120.0), Sample(t=4.25, mem_mb=2400.0, cpu_pct=100.0)],
+    )
+    _markers(
+        run_dir,
+        [_start(2.0, "a", command="sed -n 1p x"), _end(2.3, "a"), _start(4.0, "b", command="python train.py"), _end(4.3, "b")],
+    )
     sed, train = reduce_run(run_dir).records
     assert sed.pre_call_mb == 1500.0 and sed.delta_peak_mb == 10.0
     assert train.delta_peak_mb == 1000.0
@@ -180,7 +190,7 @@ def test_first_call_with_no_prior_sample_uses_its_own_first_sample(run_dir: Path
 
 
 def test_overlapping_calls_are_marked_shared():
-    from features.wrapper.reduce import count_overlaps
+    from cordon.wrapper.reduce import count_overlaps
 
     assert count_overlaps([(0.0, 5.0), (1.0, 2.0), (3.0, 4.0), (6.0, 7.0)]) == [2, 1, 1, 0]
     assert count_overlaps([(0.0, 1.0), (1.0, 2.0)]) == [0, 0]  # touching is not overlapping
@@ -188,7 +198,7 @@ def test_overlapping_calls_are_marked_shared():
 
 
 def test_heaviest_calls_skip_interactive_tools_and_rank_by_delta(make_call):
-    from features.analysis.metrics import heaviest_calls
+    from cordon.analysis.metrics import heaviest_calls
 
     calls = [make_call(command="sed"), make_call(command="train"), make_call(command="plan", tool_type="ExitPlanMode")]
     calls[0].delta_peak_mb, calls[1].delta_peak_mb, calls[2].delta_peak_mb = 5.0, 900.0, 5000.0
@@ -196,29 +206,34 @@ def test_heaviest_calls_skip_interactive_tools_and_rank_by_delta(make_call):
 
 
 def test_assign_procs_gives_each_process_to_the_call_that_started_it():
-    from features.wrapper.reduce import assign_procs
+    from cordon.wrapper.reduce import assign_procs
 
     windows = [(10.0, 20.0), (12.0, 13.0), (30.0, 31.0)]
-    procs = [{"pid": 1, "created": 10.2}, {"pid": 2, "created": 12.5}, {"pid": 3, "created": 15.0},
-             {"pid": 4, "created": 25.0}, {"pid": 5, "created": 30.02}]
+    procs = [
+        {"pid": 1, "created": 10.2},
+        {"pid": 2, "created": 12.5},
+        {"pid": 3, "created": 15.0},
+        {"pid": 4, "created": 25.0},
+        {"pid": 5, "created": 30.02},
+    ]
     owned = assign_procs(windows, procs)
     assert owned == [{1: 10.2, 3: 15.0}, {2: 12.5}, {5: 30.02}]  # 4 was born between calls
 
 
 def test_windows_close_at_our_post_hook_when_markers_lack_spawn_ts():
-    from features.wrapper.reduce import close_at_post_hook
+    from cordon.wrapper.reduce import close_at_post_hook
 
     procs = [
-        {"pid": 1, "ppid": 0, "created": 9.9, "cmd": 'bash -c "/v/cordon" hook'},   # our pre hook
+        {"pid": 1, "ppid": 0, "created": 9.9, "cmd": 'bash -c "/v/cordon" hook'},  # our pre hook
         {"pid": 2, "ppid": 0, "created": 13.0, "cmd": 'bash -c "/v/cordon" hook'},  # our post hook
-        {"pid": 3, "ppid": 2, "created": 13.2, "cmd": "conhost"},                   # its child, not a top
+        {"pid": 3, "ppid": 2, "created": 13.2, "cmd": "conhost"},  # its child, not a top
     ]
     assert close_at_post_hook([(10.0, 14.0), (20.0, 21.0)], procs) == [(10.0, 13.0), (20.0, 21.0)]
     assert close_at_post_hook([(10.0, 12.5)], procs) == [(10.0, 12.5)]  # earlier spawn_ts wins
 
 
 def test_assign_procs_keeps_hook_trees_and_cordon_out_of_the_call():
-    from features.wrapper.reduce import assign_procs
+    from cordon.wrapper.reduce import assign_procs
 
     # Tool window: start marker at 10.0, post-hooks spawned at 14.0 (tool finished).
     windows = [(10.0, 14.0)]
@@ -227,15 +242,15 @@ def test_assign_procs_keeps_hook_trees_and_cordon_out_of_the_call():
         return {"pid": pid, "ppid": ppid, "created": created, "cmd": cmd}
 
     procs = [
-        p(100, 1, 9.8, "bash -c node pre-hook.js"),        # pre-hook, spawned before the start marker
-        p(101, 100, 11.0, "node pre-hook.js"),             # ...still busy inside the window: its tree
+        p(100, 1, 9.8, "bash -c node pre-hook.js"),  # pre-hook, spawned before the start marker
+        p(101, 100, 11.0, "node pre-hook.js"),  # ...still busy inside the window: its tree
         p(200, 1, 10.6, "powershell -EncodedCommand AAA"),  # the tool itself
-        p(201, 200, 11.5, "python train.py"),              # what the tool ran
+        p(201, 200, 11.5, "python train.py"),  # what the tool ran
         p(300, 1, 14.0, 'bash -c "C:/v/cordon.exe" hook'),  # our own post hook
-        p(301, 1, 14.0, "bash -c node post-hook.js"),      # someone else's post hook
+        p(301, 1, 14.0, "bash -c node post-hook.js"),  # someone else's post hook
         p(400, 1, 12.0, 'bash -c "C:/v/cordon.exe" hook'),  # a cordon hook inside the window
-        p(401, 400, 12.1, "conhost 0x4"),                   # ...and its child
-        p(100, 1, 13.0, "python other.py"),                 # pid 100 recycled: not pre-hook's tree
+        p(401, 400, 12.1, "conhost 0x4"),  # ...and its child
+        p(100, 1, 13.0, "python other.py"),  # pid 100 recycled: not pre-hook's tree
     ]
     (owned,) = assign_procs(windows, procs)
     assert owned == {200: 10.6, 201: 11.5, 100: 13.0}
@@ -244,15 +259,24 @@ def test_assign_procs_keeps_hook_trees_and_cordon_out_of_the_call():
 def test_subtree_attribution_ignores_the_agents_own_memory(run_dir: Path):
     # Agent tree sits at 1500 MB and wobbles by 300 MB; the tool's own child peaks at 900 MB.
     samples = [Sample(t=t, mem_mb=1500.0 + (300.0 if t % 1 else 0.0), cpu_pct=20.0) for t in (1.0, 1.5)]
-    samples += [Sample(t=t, mem_mb=2400.0, cpu_pct=120.0, kids={"77": [m, 100.0], "5": [50.0, 1.0]})
-                for t, m in ((2.0, 600.0), (2.5, 900.0))]
+    samples += [
+        Sample(t=t, mem_mb=2400.0, cpu_pct=120.0, kids={"77": [m, 100.0], "5": [50.0, 1.0]})
+        for t, m in ((2.0, 600.0), (2.5, 900.0))
+    ]
     samples += [Sample(t=3.0, mem_mb=1800.0, cpu_pct=20.0), Sample(t=3.5, mem_mb=1800.0, cpu_pct=20.0)]
     _samples(run_dir, samples)
     with JsonlWriter(run_dir / "procs.jsonl") as writer:
         writer.write({"pid": 77, "created": 2.0})  # born in the first call
-        writer.write({"pid": 5, "created": 0.1})   # long-lived, predates every call
-    _markers(run_dir, [_start(1.9, "a", command="python train.py"), _end(2.6, "a"),
-                       _start(3.0, "b", tool="Read", command="x.py"), _end(3.4, "b")])
+        writer.write({"pid": 5, "created": 0.1})  # long-lived, predates every call
+    _markers(
+        run_dir,
+        [
+            _start(1.9, "a", command="python train.py"),
+            _end(2.6, "a"),
+            _start(3.0, "b", tool="Read", command="x.py"),
+            _end(3.4, "b"),
+        ],
+    )
     train, read = reduce_run(run_dir).records
     assert train.attribution == read.attribution == "subtree"
     assert train.own_peak_mb == 900.0 and train.own_procs == 1 and train.own_avg_cpu_pct == 100.0

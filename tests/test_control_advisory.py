@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from features import host
-from features.control import advisory as advisory_module
-from features.control.advisory import AdvisoryBackend, nice_for_weight, tree_memory_bytes
-from features.control.intent import FeedbackPolicy, resolve_intent
+from cordon import host
+from cordon.control import advisory as advisory_module
+from cordon.control.advisory import AdvisoryBackend, nice_for_weight, tree_memory_bytes
+from cordon.control.intent import FeedbackPolicy, resolve_intent
 
 MB = 1024 * 1024
 GB = 1024**3

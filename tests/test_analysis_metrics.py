@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from features.analysis.metrics import (
+from cordon.analysis.metrics import (
     analyze_dataset,
     analyze_run,
-    bash_category_breakdown,
     baseline_mb,
+    bash_category_breakdown,
     burst_profile,
     classify_bash,
     execution_split,
@@ -219,10 +219,9 @@ def test_retry_profile_only_watches_the_named_tools(make_call):
 
 
 def test_retry_profile_finds_multiple_groups(make_call):
-    calls = (
-        [make_call(command="pytest", start_ts=float(i)) for i in range(3)]
-        + [make_call(command="ls", start_ts=10.0 + i) for i in range(3)]
-    )
+    calls = [make_call(command="pytest", start_ts=float(i)) for i in range(3)] + [
+        make_call(command="ls", start_ts=10.0 + i) for i in range(3)
+    ]
     profile = retry_profile(calls)
     assert profile.n_groups == 2
     assert {g.command for g in profile.groups} == {"pytest", "ls"}
@@ -247,7 +246,7 @@ def test_analyze_run_returns_no_correlation_without_variance(make_run, make_samp
 
 def test_analyze_run_degrades_instead_of_raising(make_run, monkeypatch):
     monkeypatch.setattr(
-        "features.analysis.metrics.execution_split",
+        "cordon.analysis.metrics.execution_split",
         lambda _run: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     metrics = analyze_run(make_run())
@@ -299,13 +298,15 @@ def test_analyze_dataset_on_no_runs_is_all_zeroes():
 
 
 def test_memory_profile_prefers_unique_memory_but_keeps_rss(make_run):
-    from features.analysis.metrics import memory_profile
-    from features.wrapper.schema import Sample
+    from cordon.analysis.metrics import memory_profile
+    from cordon.wrapper.schema import Sample
 
     old = make_run(samples=[Sample(t=0, mem_mb=100, cpu_pct=0), Sample(t=1, mem_mb=300, cpu_pct=0)])
     assert memory_profile(old).metric == "rss"
     assert memory_profile(old).peak_mb == 300
 
-    new = make_run(samples=[Sample(t=0, mem_mb=100, cpu_pct=0, mem_mb_unique=40), Sample(t=1, mem_mb=300, cpu_pct=0, mem_mb_unique=90)])
+    new = make_run(
+        samples=[Sample(t=0, mem_mb=100, cpu_pct=0, mem_mb_unique=40), Sample(t=1, mem_mb=300, cpu_pct=0, mem_mb_unique=90)]
+    )
     profile = memory_profile(new)
     assert (profile.metric, profile.peak_mb, profile.rss_peak_mb, profile.baseline_mb) == ("unique", 90, 300, 40)

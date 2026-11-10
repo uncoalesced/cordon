@@ -1,0 +1,432 @@
+# Engineered by uncoalesced
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+from cordon.analysis.metrics import DatasetMetrics, HeavyCall, RunMetrics, ToolTypeStats
+from cordon.wrapper.schema import INTERACTIVE_TOOLS
+
+PAPER = "AgentCgroup §6"
+
+METHODOLOGY = """## Methodology
+
+Cordon samples the agent's whole process tree (RSS summed, CPU percent summed) at a fixed
+interval for the duration of a session, while `PreToolUse` / `PostToolUse` hooks write
+timestamped markers. `cordon reduce` slices the sample stream by tool-call window; the numbers
+below come from those slices plus the uncut session stream.
+
+Definitions used here, stated because they are choices rather than givens:
+
+- **Baseline memory** — the 10th percentile of all samples in the session. This approximates
+  the framework's resting footprint, the layer AgentCgroup §6 measures at ~185MB.
+- **Memory metric** — where the sampler recorded it, per-run memory figures use unique memory
+  (PSS on Linux, USS on macOS, private bytes on Windows), which does not double-count pages
+  shared across the tree. Older runs, and per-call peaks, use summed RSS. The per-run table
+  says which one each row used.
+- **Added memory / CPU (per call)** — samples cover the whole agent process tree, and the agent
+  itself is already large and busy while it works, so a call's raw peak mostly measures the
+  agent. Runs recorded with per-process data charge each call only for its own processes. Where
+  the run shows Claude Code's tool processes (the Bash tool's shell-snapshot shell, the
+  PowerShell tool's launcher, Grep/Glob's `rg`), a call owns only trees of its own tool born in
+  its window; hooks, MCP servers and the agent's helpers start at the same moments and are never
+  billed to it. Other agents get every tree born in the window, minus hook trees. Tools that run
+  inside the agent (Read, Edit, Write, MCP tools) start nothing and are charged 0. Older runs fall
+  back to how far the tree rose above its median level in the second before the call.
+  Overlapping calls are marked: their attribution is a best guess.
+- **Hooks** — recognised by the hook commands configured for the session (`hooks.json`, written
+  at SessionStart; runs older than that use today's config) and, for Claude Code runs, by being
+  a `<shell> -c` child born within 1.5 s of a hook event.
+- **Active time** — wall-clock time minus gaps of more than 10 minutes with no hook event,
+  except inside a tool call. A resumed session keeps its run, so its span can cover days.
+- **Burst** — a sample exceeding baseline by more than the burst threshold (300MB by default,
+  matching the paper's ">300MB" bursts).
+- **Tool time** — the union of tool-call windows, not their sum, so overlapping concurrent
+  calls cannot push the fraction above 1. Calls that wait on you (AskUserQuestion,
+  ExitPlanMode) are left out: their duration is your thinking time. Shares are of active time.
+- **Retry group** — three or more strictly consecutive tool calls of the same type with a
+  byte-identical command, matching the paper's definition.
+- **Task peak/avg ratio** — session peak memory over session mean memory, the shape of the
+  paper's 15.4× headline figure.
+
+## Known divergences from the paper's setup
+
+These are structural, known before any data was collected, and they are why some rows below
+cannot match even in principle:
+
+1. **No container.** The paper runs Claude Code inside Podman and attributes 29–45% of task
+   time to container initialization. Cordon measures a natively-installed agent, so the
+   initialization phase does not exist here. The paper's combined "56–74% OS overhead" figure
+   is therefore not reproducible; only its tool-execution half is.
+2. **Different process shape.** The paper's baseline is a single containerized Node runtime at
+   ~185MB. The measured target here is a desktop Claude Code install spanning ~10–11 processes,
+   with a resting tree footprint several times larger. Ratios computed against that larger
+   baseline are compressed relative to the paper's, and absolute megabyte comparisons are not
+   meaningful — the *shape* of the burst behaviour is what carries over.
+3. **RSS double-counts shared pages** across a parent and its children. The paper reports RSS
+   too, so the bias is shared, but it grows with process count and this tree is wider.
+4. **Sampling is 250ms, not the paper's continuous accounting.** Tool calls shorter than one
+   tick land in no sample at all; those are counted as empty windows by the reducer rather
+   than silently reported as zero-cost.
+"""
+
+
+@dataclass
+class Comparison:
+    metric: str
+    measured: str
+    paper: str
+    verdict: str
+
+
+def _pct(value: float | None) -> str:
+    return "n/a" if value is None else f"{value * 100:.1f}%"
+
+
+def _num(value: float | None, suffix: str = "") -> str:
+    return "n/a" if value is None else f"{value:.2f}{suffix}"
+
+
+def _verdict(value: float | None, low: float, high: float) -> str:
+    if value is None:
+        return "no data"
+    if value < low:
+        return "diverges (lower)"
+    if value > high:
+        return "diverges (higher)"
+    return "matches"
+
+
+def _share_of(stats: Sequence[ToolTypeStats], name: str) -> float | None:
+    if not stats:
+        return None
+    for entry in stats:
+        if entry.tool_type == name:
+            return entry.time_share
+    return 0.0
+
+
+def _when(condition: bool, value: float | None) -> float | None:
+    return value if condition else None
+
+
+def comparison_rows(dataset: DatasetMetrics) -> list[Comparison]:
+    has_runs = dataset.n_runs > 0
+
+    bash_share = _share_of(dataset.tool_types, "Bash")
+    test_share = _share_of(dataset.bash_categories, "test")
+    peak_ratio = _when(dataset.max_task_peak_avg_ratio > 0, dataset.max_task_peak_avg_ratio)
+    retry_prevalence = _when(has_runs, dataset.runs_with_retries_fraction)
+    retry_time = _when(has_runs, dataset.mean_retry_time_fraction)
+    tool_fraction = _when(has_runs, dataset.mean_tool_time_fraction)
+    sampled_in_tools = _when(has_runs, dataset.mean_sample_time_in_tools_fraction)
+    bursts_in_tools = _when(any(run.bursts.n_burst_samples for run in dataset.runs), dataset.mean_bursts_in_tools_fraction)
+    change_rate = _when(dataset.max_change_rate_mb_per_s > 0, dataset.max_change_rate_mb_per_s)
+
+    return [
+        Comparison(
+            "Tool execution share of session time",
+            _pct(tool_fraction),
+            "36.4–42.5% of active time",
+            _verdict(tool_fraction, 0.364, 0.425),
+        ),
+        Comparison(
+            "Task peak/avg memory ratio (max)",
+            _num(peak_ratio, "×"),
+            "15.4× (pydicom outlier)",
+            _verdict(peak_ratio, 2.0, 15.4),
+        ),
+        Comparison(
+            "Bash share of tool time",
+            _pct(bash_share),
+            "47.8–98.1%",
+            _verdict(bash_share, 0.478, 0.981),
+        ),
+        Comparison(
+            "Test execution share of Bash time",
+            _pct(test_share),
+            "43.7–72.9%",
+            _verdict(test_share, 0.437, 0.729),
+        ),
+        Comparison(
+            "Runs containing retry groups",
+            _pct(retry_prevalence),
+            "85–97% of tasks",
+            _verdict(retry_prevalence, 0.85, 0.97),
+        ),
+        Comparison(
+            "Time spent inside retry groups",
+            _pct(retry_time),
+            "7.4–20.5%",
+            _verdict(retry_time, 0.074, 0.205),
+        ),
+        Comparison(
+            "CPU/memory correlation range",
+            f"{_num(dataset.correlation_min)} to {_num(dataset.correlation_max)}",
+            "-0.84 to +0.50 (mean -0.39)",
+            _verdict(dataset.correlation_mean, -0.84, 0.50),
+        ),
+        Comparison(
+            "Sampling time inside tool calls",
+            _pct(sampled_in_tools),
+            "35.9–50.6%",
+            _verdict(sampled_in_tools, 0.359, 0.506),
+        ),
+        Comparison(
+            "Bursts above threshold inside tool calls",
+            _pct(bursts_in_tools),
+            "67.3–98.5%",
+            _verdict(bursts_in_tools, 0.673, 0.985),
+        ),
+        Comparison(
+            "Peak memory change rate",
+            _num(change_rate, " MB/s"),
+            "~3000 MB/s",
+            _verdict(change_rate, 1000.0, 1e9),
+        ),
+    ]
+
+
+def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    if not rows:
+        return "_No data._\n"
+    lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
+    lines += ["| " + " | ".join(row) + " |" for row in rows]
+    return "\n".join(lines) + "\n"
+
+
+def _tool_table(stats: Sequence[ToolTypeStats], label: str) -> str:
+    return _table(
+        [
+            label,
+            "Calls",
+            "Total time (s)",
+            "Share of time",
+            "Mean duration (s)",
+            "Mean added (MB)",
+            "Max added (MB)",
+            "Mean added CPU",
+            "Max tree peak (MB)",
+        ],
+        [
+            [
+                entry.tool_type,
+                str(entry.n_calls),
+                f"{entry.total_time_s:.1f}",
+                "waits on you" if entry.tool_type in INTERACTIVE_TOOLS else _pct(entry.time_share),
+                f"{entry.mean_duration_s:.2f}",
+                f"{entry.mean_delta_peak_mb:.1f}",
+                f"{entry.max_delta_peak_mb:.1f}",
+                f"{entry.mean_delta_cpu_pct:.0f}%",
+                f"{entry.max_peak_mb:.1f}",
+            ]
+            for entry in stats
+        ],
+    )
+
+
+def _heavy_table(calls: Sequence[HeavyCall]) -> str:
+    if not calls:
+        return "_No tool call rose above its pre-call level._\n"
+    return _table(
+        ["Added (MB)", "Added CPU", "Measured as", "Duration (s)", "Tool", "Command", "Overlap"],
+        [
+            [
+                f"{call.delta_peak_mb:.0f}",
+                f"{call.delta_cpu_pct:.0f}%",
+                f"own {call.own_procs} proc(s)" if call.attribution == "subtree" else f"rise over {call.pre_call_mb:.0f} MB",
+                f"{call.duration_s:.1f}",
+                call.tool_type,
+                "`" + call.command[:60].replace("|", "\\|").replace("`", "'").replace("\n", " ") + "`",
+                f"shared ({call.concurrent_calls})" if call.concurrent_calls else "",
+            ]
+            for call in calls
+        ],
+    )
+
+
+_KIND_NAMES = {"hook": "hook", "background": "background", "other": "agent / other"}
+
+
+def _groups_section(dataset: DatasetMetrics) -> list[str]:
+    groups = dataset.process_groups
+    if not groups:
+        return []
+    hook_cpu = sum(g["cpu_s"] for g in groups if g["kind"] == "hook")
+    lines = [
+        "## Where the rest went",
+        "",
+        "Processes no tool call was charged with, by what started them: other plugins' and "
+        "settings' hooks, a call's processes still running after it returned (background), and "
+        "the agent's own helpers (MCP servers, git, ...). CPU is CPU-seconds while sampled; "
+        "peak is the most memory the group held at once.",
+        "",
+    ]
+    if hook_cpu > 0:
+        lines += [
+            f"Hooks used **{hook_cpu:.0f} CPU-s**; every tool call together was charged "
+            f"**{dataset.total_tool_cpu_s:.0f} CPU-s**.",
+            "",
+        ]
+    headers = ["Kind", "What", "Processes", "CPU (s)", "Peak (MB)"]
+    multi = dataset.n_runs > 1
+    if multi:
+        headers.append("Runs")
+    rows = []
+    for g in groups:
+        row = [
+            _KIND_NAMES.get(g["kind"], g["kind"]),
+            "`" + str(g["label"]).replace("|", "\\|").replace("`", "'") + "`",
+            str(g["procs"]),
+            f"{g['cpu_s']:.1f}",
+            f"{g['peak_mb']:.0f}",
+        ]
+        if multi:
+            row.append(str(g.get("runs", 1)))
+        rows.append(row)
+    return [*lines, _table(headers, rows), ""]
+
+
+def _never_ran_section(unpaired: dict[str, Any]) -> list[str]:
+    if not unpaired:
+        return []
+    total = sum(unpaired.values())
+    detail = ", ".join(f"{tool} {count}" for tool, count in unpaired.items())
+    return [
+        "## Calls that never finished",
+        "",
+        f"{total} tool call(s) started and never reported an end ({detail}). Usually a "
+        "PreToolUse hook blocked them, you denied them, or the turn was interrupted; they are "
+        "left out of every table above.",
+        "",
+    ]
+
+
+def _run_table(runs: Sequence[RunMetrics]) -> str:
+    return _table(
+        [
+            "Task",
+            "Calls",
+            "Span (s)",
+            "Active (s)",
+            "Tool time",
+            "Metric",
+            "Baseline (MB)",
+            "Peak (MB)",
+            "Peak RSS (MB)",
+            "Peak/avg",
+            "Retry groups",
+            "CPU/mem r",
+        ],
+        [
+            [
+                run.task_id[:24],
+                str(run.execution.n_toolcalls),
+                f"{run.execution.span_s:.1f}",
+                f"{run.execution.active_s:.1f}",
+                _pct(run.execution.tool_time_fraction),
+                run.memory.metric,
+                f"{run.memory.baseline_mb:.1f}",
+                f"{run.memory.peak_mb:.1f}",
+                f"{run.memory.rss_peak_mb:.1f}",
+                _num(run.memory.task_peak_avg_ratio, "×"),
+                str(run.retries.n_groups),
+                _num(run.cpu_memory_correlation),
+            ]
+            for run in runs
+        ],
+    )
+
+
+def render_report(dataset: DatasetMetrics, title: str = "Stage 1 — Characterization Findings") -> str:
+    generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+    sections = [
+        f"# {title}",
+        "",
+        "<!-- Generated by `cordon analyze`. Hand edits below the generated tables are lost on regeneration. -->",
+        "",
+        f"Generated {generated} from {dataset.n_runs} run(s) and {dataset.n_toolcalls} tool call(s), compared against {PAPER}.",
+        "",
+    ]
+
+    if dataset.n_runs == 0:
+        sections += [
+            "## No dataset yet",
+            "",
+            "No reduced runs were found. Install the hooks into a task repo, run the agent across a",
+            "batch of tasks, reduce each session, then re-run `cordon analyze` to replace this section",
+            "with measured results.",
+            "",
+            METHODOLOGY,
+        ]
+        return "\n".join(sections)
+
+    if dataset.degraded_runs:
+        sections += [
+            f"> **{dataset.degraded_runs} of {dataset.n_runs} runs analyzed in degraded mode.** "
+            "Their metrics are partial; see the run log for tracebacks.",
+            "",
+        ]
+
+    if dataset.empty_runs:
+        sections += [
+            f"{dataset.empty_runs} more session(s) never called a tool; they are left out of every figure.",
+            "",
+        ]
+
+    metrics_used = sorted({run.memory.metric for run in dataset.runs})
+    sections += [
+        f"Memory metric for per-run figures: {', '.join(metrics_used)} (see Methodology).",
+        "",
+        "## Comparison against the paper",
+        "",
+        _table(
+            ["Metric", "Measured", f"{PAPER}", "Verdict"],
+            [[row.metric, row.measured, row.paper, row.verdict] for row in comparison_rows(dataset)],
+        ),
+        "",
+        "## Heaviest tool calls",
+        "",
+        "Memory each call is charged with: the processes it started (*own N procs*) when the "
+        "sampler recorded them, otherwise its rise above the agent tree's level in the second "
+        "before it began. Calls marked *shared* overlapped another tool call. Tools that only "
+        "wait on the user are left out.",
+        "",
+        _heavy_table(dataset.heaviest_calls),
+        "",
+        *_groups_section(dataset),
+        *_never_ran_section(dataset.unpaired_by_tool),
+        "## Per-tool-type breakdown",
+        "",
+        _tool_table(dataset.tool_types, "Tool"),
+        "",
+        "## Shell command categories",
+        "",
+        "Bash and PowerShell calls, by what the command line runs (setup like `cd` and env assignments does not count).",
+        "",
+        _tool_table(dataset.bash_categories, "Category"),
+        "",
+        "## Per-run detail",
+        "",
+        _run_table(dataset.runs),
+        "",
+        "## Retry loops",
+        "",
+    ]
+
+    retry_rows = [
+        [run.task_id[:24], group.command[:60], str(group.length), f"{group.total_time_s:.1f}"]
+        for run in dataset.runs
+        for group in run.retries.groups
+    ]
+    sections += [
+        _table(["Task", "Command", "Repeats", "Time (s)"], retry_rows),
+        "",
+        METHODOLOGY,
+    ]
+
+    return "\n".join(sections)

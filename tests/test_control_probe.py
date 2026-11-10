@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from features.control import probe as probe_module
-from features.control.probe import (
+from cordon.control import probe as probe_module
+from cordon.control.probe import (
     CAP_BPF,
     CAP_SYS_ADMIN,
     Capability,
@@ -115,9 +115,7 @@ def test_unreadable_status_degrades(tmp_path: Path):
 
 
 def test_a_termux_environment_names_itself():
-    described = describe_environment(
-        {"TERMUX__ROOTFS_DIR": "/data/data/com.termux/files", "TERMUX_APP_PID": "3325"}
-    )
+    described = describe_environment({"TERMUX__ROOTFS_DIR": "/data/data/com.termux/files", "TERMUX_APP_PID": "3325"})
     assert "Termux" in described
 
 
@@ -226,8 +224,14 @@ def test_psi_detection(tmp_path: Path):
 @pytest.mark.parametrize(
     "flags,expected",
     [
-        ({"cgroup2": False, "cgroup2_writable": False, "sched_ext": False, "memcg_bpf_ops": False, "capabilities": False}, "none"),
-        ({"cgroup2": True, "cgroup2_writable": True, "sched_ext": False, "memcg_bpf_ops": False, "capabilities": True}, "cgroup2"),
+        (
+            {"cgroup2": False, "cgroup2_writable": False, "sched_ext": False, "memcg_bpf_ops": False, "capabilities": False},
+            "none",
+        ),
+        (
+            {"cgroup2": True, "cgroup2_writable": True, "sched_ext": False, "memcg_bpf_ops": False, "capabilities": True},
+            "cgroup2",
+        ),
         ({"cgroup2": True, "cgroup2_writable": True, "sched_ext": True, "memcg_bpf_ops": False, "capabilities": True}, "cgroup2"),
         ({"cgroup2": True, "cgroup2_writable": True, "sched_ext": True, "memcg_bpf_ops": True, "capabilities": True}, "bpf"),
         ({"cgroup2": True, "cgroup2_writable": True, "sched_ext": True, "memcg_bpf_ops": True, "capabilities": False}, "cgroup2"),
@@ -351,7 +355,9 @@ def test_advisory_capability_per_os(monkeypatch):
     assert "taskpolicy=" in darwin.detail
     assert probe_module.probe_advisory("linux").available is True
     windows = probe_module.probe_advisory("windows")
-    assert windows.available is False and "null backend" in windows.detail
+    assert windows.available is False and "Job Objects" in windows.detail
+    other = probe_module.probe_advisory("android")
+    assert other.available is False and "null backend" in other.detail
 
 
 def test_probe_lists_the_backend_capabilities():

@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-f5c400?style=flat-square&labelColor=0d0d10" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-f5c400?style=flat-square&labelColor=0d0d10" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/measurement-linux%20%7C%20macOS%20%7C%20windows-f5c400?style=flat-square&labelColor=0d0d10" alt="Measurement: Linux, macOS, Windows">
-  <img src="https://img.shields.io/badge/limits-linux%20cgroup%20v2%20%7C%20macOS%20advisory-9a5b00?style=flat-square&labelColor=0d0d10" alt="Limits: Linux cgroup v2, macOS advisory">
+  <img src="https://img.shields.io/badge/limits-linux%20cgroup%20v2%20%7C%20windows%20job%20objects%20%7C%20macOS%20advisory-9a5b00?style=flat-square&labelColor=0d0d10" alt="Limits: Linux cgroup v2, Windows Job Objects, macOS advisory">
   <a href="docs/stage1-design.md"><img src="https://img.shields.io/badge/grounded%20in-AgentCgroup%20%2F%20AgentSight-0d0d10?style=flat-square&labelColor=f5c400" alt="Grounded in AgentCgroup / AgentSight"></a>
 </p>
 
@@ -100,10 +100,17 @@ claims anything, so it won't tell you a backend works when it doesn't.
 | Linux, only `systemctl --user` works | `systemd-run --user --scope` | the same limits, applied by systemd |
 | Linux without usable cgroups (WSL1, proot, locked-down containers) | `advisory` | `nice` for CPU, a memory watchdog that warns |
 | macOS | `advisory` | `nice`, plus `taskpolicy -b` for low-priority work, and a memory watchdog |
-| Windows | `null` | runs the command untouched and records what it would have applied |
+| Windows | `jobobject`, one Job Object per command | CPU weight and priority enforced; the whole tree's memory counted by the kernel and watched; `--hard` caps it |
 
 The first row is the one most Linux desktops land on, and it needs no sudo. Earlier versions of
 Cordon only tried the cgroup root, which meant nobody without root got real limits.
+
+Windows can't throttle memory the way `memory.high` does: a job can only refuse allocations. So by
+default a Windows job *watches* memory (kernel-accounted peak, time over the limit, the same agent
+note) and lets the command finish. `cordon control run --hard ...` sets a real cap instead:
+allocations past the limit fail and most programs exit with an out-of-memory error. The command
+starts suspended and joins its job before it runs, so nothing it spawns escapes. `cpu:low` runs at
+idle priority.
 
 Hints set the size. `AGENT_RESOURCE_HINT=memory:high` (or `--hint`) picks a tier:
 
@@ -260,10 +267,10 @@ cordon control contend --out contention.md     # guarded vs unguarded under CPU 
 
 ```
 assets/             logo, banner, social preview (see docs/design-language.md)
-features/host.py    the one place Linux, macOS and Windows differ: paths, quoting, detaching, data dirs
-features/wrapper/   hooks, sampler, reducer, finalize/report/status, doctor, agent registry, wrap
-features/analysis/  the analysis passes and the report
-features/control/   probe, hints, cgroup / systemd-run / advisory backends, guarded runner
+cordon/host.py    the one place Linux, macOS and Windows differ: paths, quoting, detaching, data dirs
+cordon/wrapper/   hooks, sampler, reducer, finalize/report/status, doctor, agent registry, wrap
+cordon/analysis/  the analysis passes and the report
+cordon/control/   probe, hints, cgroup / systemd-run / advisory backends, guarded runner
 scripts/            e2e_control.py, the real-kernel limit check CI runs on Linux and macOS
 docs/               design notes and findings
 tests/              pytest suite

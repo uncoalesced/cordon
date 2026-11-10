@@ -17,6 +17,28 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint, format, audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          # The runner's Python ships an old setuptools that pip-audit flags; Cordon builds with
+          # hatchling and does not need it, but the audit covers the whole environment.
+          python -m pip install --upgrade pip setuptools
+          python -m pip install -e ".[dev]" pip-audit
+      - name: Ruff
+        run: |
+          ruff check cordon tests scripts
+          ruff format --check cordon tests scripts
+      - name: Dependency audit
+        run: pip-audit --skip-editable
+
   tests:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}

@@ -1,28 +1,60 @@
 # Engineered by uncoalesced
 
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "cordon"
-version = "1.1.0"
-description = "Tool-call-granularity resource characterization and control for AI coding agents"
+name = "cordon-cli"
+dynamic = ["version"]
+description = "Per-tool-call memory and CPU recorder, with optional limits, for AI coding agents (Claude Code, Codex, Gemini CLI, Cursor, Hermes, OpenCode)"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "uncoalesced" }]
+keywords = ["claude-code", "ai-agents", "profiling", "memory", "cgroups", "hooks", "observability"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Monitoring",
+]
 dependencies = ["psutil>=5.9", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-cov>=5"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6"]
 
 [project.scripts]
-cordon = "features.wrapper.cli:main"
+cordon = "cordon.wrapper.cli:main"
+cordon-cli = "cordon.wrapper.cli:main"
 
-[tool.setuptools]
-packages = ["features", "features.wrapper", "features.analysis", "features.control"]
+[project.urls]
+Homepage = "https://github.com/uncoalesced/cordon"
+Documentation = "https://github.com/uncoalesced/cordon#readme"
+Issues = "https://github.com/uncoalesced/cordon/issues"
+Changelog = "https://github.com/uncoalesced/cordon/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "cordon/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cordon"]
+
+[tool.hatch.build.targets.sdist]
+include = ["cordon", "tests", "scripts", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=features --cov-report=term-missing"
+addopts = "--cov=cordon --cov-report=term-missing"
 # A test stuck for 2 minutes dumps every thread's traceback instead of silently eating the CI job.
 faulthandler_timeout = 120
 markers = ["integration: exercises a full sampler or hook cycle against real processes"]
@@ -30,3 +62,12 @@ markers = ["integration: exercises a full sampler or hook cycle against real pro
 [tool.coverage.run]
 branch = true
 omit = ["*/__init__.py"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+extend-exclude = ["runs", "assets"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+ignore = ["B905"]  # zips here pair equal-length lists or are deliberate pairwise walks
